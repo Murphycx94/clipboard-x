@@ -35,3 +35,7 @@ body {
 .arco-modal-content {
   padding: 12px !important;
 }
+
+.arco-list-item-meta-description {
+  @apply text-xs;
+}
