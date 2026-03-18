@@ -1,15 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 import { Radio, Input } from "@arco-design/web-react";
 import { IconSearch, IconClose, IconImage } from "@arco-design/web-react/icon";
-import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useClipboardStore } from "../store/useClipboardStore";
 import { HistoryList } from "./HistoryList";
 import { FavoriteList } from "./FavoriteList";
 import { ArchivePage } from "./ArchivePage";
 import { SettingsPanel, getHideOnBlur } from "./SettingsPanel";
 import { PanelHeader } from "./PanelHeader";
-
-const hideWindow = () => getCurrentWindow().setPosition(new PhysicalPosition(-10000, -10000));
+import { hideWindow } from "../api/commands";
 
 type View = "main" | "archive" | "settings";
 

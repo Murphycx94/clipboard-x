@@ -16,59 +16,89 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-const OFFSCREEN: PhysicalPosition<i32> = PhysicalPosition::new(-10000, -10000);
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+use tauri_nspanel::{
+    WebviewWindowExt as NSPanelWebviewWindowExt,
+    ManagerExt as NSPanelManagerExt,
+    cocoa::appkit::NSWindowCollectionBehavior,
+};
 
-fn is_offscreen(window: &tauri::WebviewWindow) -> bool {
-    window
-        .outer_position()
-        .map(|p| p.x < -9000)
-        .unwrap_or(true)
-}
+// NSWindowStyleMask
+#[cfg(target_os = "macos")]
+const NS_WINDOW_STYLE_MASK_NON_ACTIVATING_PANEL: i32 = 1 << 7;
 
 fn toggle_window(app: &tauri::AppHandle) {
-    let Some(window) = app.get_webview_window("main") else { return };
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(panel) = app.get_webview_panel("main") else { return };
 
-    // 用"是否在屏幕外"代替 is_visible 判断开/关状态
-    if !is_offscreen(&window) {
-        let _ = window.set_position(OFFSCREEN);
-        return;
+        if panel.is_visible() {
+            panel.order_out(None);
+            return;
+        }
+
+        // 定位到鼠标所在显示器右侧
+        if let Some(window) = app.get_webview_window("main") {
+            position_window_at_cursor(&window);
+        }
+
+        panel.show();
     }
+}
 
-    // 找到鼠标所在显示器，直接定位到目标位置再聚焦
-    if let Ok(monitors) = window.available_monitors() {
-        if let Ok(cursor_pos) = window.cursor_position() {
-            let cursor_x = cursor_pos.x as i64;
-            let cursor_y = cursor_pos.y as i64;
+#[cfg(target_os = "macos")]
+fn position_window_at_cursor(window: &tauri::WebviewWindow) {
+    let Ok(monitors) = window.available_monitors() else { return };
+    let Ok(cursor_pos) = window.cursor_position() else { return };
 
-            let target_monitor = monitors.iter().find(|m| {
-                let pos = m.position();
-                let size = m.size();
-                cursor_x >= pos.x as i64
-                    && cursor_x < (pos.x as i64 + size.width as i64)
-                    && cursor_y >= pos.y as i64
-                    && cursor_y < (pos.y as i64 + size.height as i64)
-            });
+    let cursor_x = cursor_pos.x as i64;
+    let cursor_y = cursor_pos.y as i64;
 
-            if let Some(monitor) = target_monitor {
-                let mon_pos = monitor.position();
-                let mon_size = monitor.size();
-                let win_size = window.outer_size().unwrap_or(PhysicalSize::new(420, 600));
-                let margin = 16i32;
+    let target_monitor = monitors.iter().find(|m| {
+        let pos = m.position();
+        let size = m.size();
+        cursor_x >= pos.x as i64
+            && cursor_x < (pos.x as i64 + size.width as i64)
+            && cursor_y >= pos.y as i64
+            && cursor_y < (pos.y as i64 + size.height as i64)
+    });
 
-                let x = mon_pos.x + mon_size.width as i32 - win_size.width as i32 - margin;
-                let y = mon_pos.y + (mon_size.height as i32 - win_size.height as i32) / 2;
-                let _ = window.set_position(PhysicalPosition::new(x, y));
-            }
+    if let Some(monitor) = target_monitor {
+        let mon_pos = monitor.position();
+        let mon_size = monitor.size();
+        let win_size = window.outer_size().unwrap_or(PhysicalSize::new(420, 600));
+        let margin = 16i32;
+
+        let x = mon_pos.x + mon_size.width as i32 - win_size.width as i32 - margin;
+        let y = mon_pos.y + (mon_size.height as i32 - win_size.height as i32) / 2;
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+    }
+}
+
+#[tauri::command]
+fn hide_window(app: tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(panel) = app.get_webview_panel("main") {
+            panel.order_out(None);
         }
     }
-
-    let _ = window.set_focus();
 }
 
 fn main() {
+    // 在 Tauri 事件循环启动前设置 Accessory 策略，防止 app 启动时抢夺焦点
+    #[cfg(target_os = "macos")]
+    #[allow(deprecated)]
+    unsafe {
+        use tauri_nspanel::cocoa::appkit::{NSApp, NSApplication, NSApplicationActivationPolicyAccessory};
+        NSApp().setActivationPolicy_(NSApplicationActivationPolicyAccessory);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_nspanel::init())
         .setup(|app| {
             // Init database
             let app_data_dir = app.path().app_data_dir()?;
@@ -92,6 +122,21 @@ fn main() {
             register_hotkey(app.handle(), &hotkey_str);
 
             app.manage(db);
+
+            // Convert window to NSPanel (macOS only)
+            #[cfg(target_os = "macos")]
+            #[allow(deprecated)]
+            {
+                let window = app.get_webview_window("main").unwrap();
+                let panel = window.to_panel().unwrap();
+
+                panel.set_style_mask(NS_WINDOW_STYLE_MASK_NON_ACTIVATING_PANEL);
+                panel.set_collection_behaviour(
+                    NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+                        | NSWindowCollectionBehavior::NSWindowCollectionBehaviorTransient
+                        | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
+                );
+            }
 
             // System tray
             let show_item = MenuItemBuilder::with_id("show", "显示 ClipboardX").build(app)?;
@@ -142,6 +187,7 @@ fn main() {
             get_image_base64,
             update_retention,
             clear_history,
+            hide_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

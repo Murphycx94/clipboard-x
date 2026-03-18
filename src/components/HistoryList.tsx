@@ -1,12 +1,9 @@
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Spin, Empty } from "@arco-design/web-react";
-import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
-import { getTodayItems, copyToClipboard } from "../api/commands";
+import { getTodayItems, copyToClipboard, hideWindow } from "../api/commands";
 import { ClipboardItemCard } from "./ClipboardItemCard";
 import { useClipboardStore } from "../store/useClipboardStore";
-
-const hideWindow = () => getCurrentWindow().setPosition(new PhysicalPosition(-10000, -10000));
 
 export function HistoryList() {
   const searchQuery = useClipboardStore((s) => s.searchQuery);
