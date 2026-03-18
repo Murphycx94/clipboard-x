@@ -36,3 +36,6 @@ export const updateRetention = (days: number): Promise<void> =>
 
 export const clearHistory = (): Promise<number> =>
   invoke("clear_history");
+
+export const hideWindow = (): Promise<void> =>
+  invoke("hide_window");

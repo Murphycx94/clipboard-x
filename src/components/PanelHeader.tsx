@@ -1,6 +1,6 @@
 import { Button } from "@arco-design/web-react";
 import { IconArchive, IconSettings, IconClose } from "@arco-design/web-react/icon";
-import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
+import { hideWindow } from "../api/commands";
 
 type View = "main" | "archive" | "settings";
 
@@ -8,8 +8,6 @@ interface Props {
   view: View;
   onViewChange: (view: View) => void;
 }
-
-const hideWindow = () => getCurrentWindow().setPosition(new PhysicalPosition(-10000, -10000));
 
 export function PanelHeader({ view, onViewChange }: Props) {
   return (
