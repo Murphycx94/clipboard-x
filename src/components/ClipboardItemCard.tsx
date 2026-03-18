@@ -8,9 +8,11 @@ import { useQueryClient } from "@tanstack/react-query";
 
 interface Props {
   item: ClipboardItem;
+  focused?: boolean;
+  onHover?: () => void;
 }
 
-export function ClipboardItemCard({ item }: Props) {
+export function ClipboardItemCard({ item, focused, onHover }: Props) {
   const queryClient = useQueryClient();
   const [copied, setCopied] = useState(false);
 
@@ -39,8 +41,9 @@ export function ClipboardItemCard({ item }: Props) {
   return (
     <div
       onClick={handleCopy}
+      onMouseEnter={onHover}
       className={`group flex items-center gap-3 px-4 py-3 transition-colors cursor-pointer ${
-        copied ? "bg-indigo-50" : "hover:bg-gray-50"
+        copied ? "bg-indigo-50" : focused ? "bg-[#ecedf0]" : "hover:bg-gray-100"
       }`}
     >
       <span className="text-xs text-gray-400 w-10 shrink-0">{timeStr}</span>
