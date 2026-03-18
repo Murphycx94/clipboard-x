@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Radio, Input, Button } from "@arco-design/web-react";
 import { IconArchive, IconSettings, IconClose, IconSearch } from "@arco-design/web-react/icon";
 import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
@@ -15,6 +15,15 @@ type View = "main" | "archive" | "settings";
 export function MainPanel() {
   const { activeTab, setActiveTab, searchQuery, setSearchQuery } = useClipboardStore();
   const [view, setView] = useState<View>("main");
+
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    win.onFocusChanged(({ payload: focused }) => {
+      if (!focused) hideWindow();
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
 
   return (
     <div className="flex flex-col flex-1 bg-white rounded-xl overflow-hidden">
