@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Spin, Empty } from "@arco-design/web-react";
 import { getTodayItems } from "../api/commands";
 import { ClipboardItemCard } from "./ClipboardItemCard";
 import { useClipboardStore } from "../store/useClipboardStore";
@@ -17,13 +18,17 @@ export function HistoryList() {
   });
 
   if (isLoading) {
-    return <div className="p-4 text-sm text-gray-400">加载中...</div>;
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <Spin size={20} />
+      </div>
+    );
   }
 
   if (filtered.length === 0) {
     return (
-      <div className="p-8 text-center text-sm text-gray-400">
-        {searchQuery ? "无匹配内容" : "今日暂无复制记录"}
+      <div className="flex-1 flex items-center justify-center">
+        <Empty description={searchQuery ? "无匹配内容" : "今日暂无复制记录"} />
       </div>
     );
   }

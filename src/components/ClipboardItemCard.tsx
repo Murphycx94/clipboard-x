@@ -1,6 +1,8 @@
 import { useState } from "react";
+import { Button } from "@arco-design/web-react";
+import { IconStar, IconStarFill, IconDelete } from "@arco-design/web-react/icon";
+import { Check } from "lucide-react";
 import { ClipboardItem } from "../types";
-import { Star, Trash2, Check } from "lucide-react";
 import { copyToClipboard, toggleFavorite, deleteItem } from "../api/commands";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -37,12 +39,17 @@ export function ClipboardItemCard({ item }: Props) {
   return (
     <div
       onClick={handleCopy}
-      className={`group flex items-start gap-3 px-4 py-3 rounded-lg transition-colors cursor-pointer ${copied ? "bg-indigo-50" : "hover:bg-gray-50"}`}>
-      <div className="text-xs text-gray-400 w-10 mt-0.5 shrink-0">{timeStr}</div>
+      className={`group flex items-center gap-3 px-4 py-3 transition-colors cursor-pointer ${
+        copied ? "bg-indigo-50" : "hover:bg-gray-50"
+      }`}
+    >
+      <span className="text-xs text-gray-400 w-10 shrink-0">{timeStr}</span>
 
       <div className="flex-1 min-w-0">
         {item.content_type === "text" ? (
-          <p className="text-sm text-gray-800 truncate" title={item.text_content ?? ''}>{item.text_content}</p>
+          <p className="text-sm text-gray-800 truncate" title={item.text_content ?? ""}>
+            {item.text_content}
+          </p>
         ) : (
           <div className="flex items-center gap-2">
             {item.image_thumbnail && (
@@ -60,31 +67,34 @@ export function ClipboardItemCard({ item }: Props) {
         )}
       </div>
 
-      <div className="flex items-center gap-1 shrink-0">
+      <div className="flex items-center gap-0.5 shrink-0">
         {copied ? (
-          <div className="flex items-center gap-1">
-            <div className="p-1.5">
-              <Check size={14} className="text-indigo-400" />
-            </div>
-            <div className="p-1.5 opacity-0"><Star size={14} /></div>
-            <div className="p-1.5 opacity-0"><Trash2 size={14} /></div>
+          <div className="flex items-center gap-0.5">
+            <Button type="text" size="mini" icon={<Check size={16} />} style={{ color: "rgb(99 102 241)" }} />
+            <Button type="text" size="mini" icon={<IconStar style={{ fontSize: 16 }} />} style={{ opacity: 0 }} />
+            <Button type="text" size="mini" icon={<IconDelete style={{ fontSize: 16 }} />} style={{ opacity: 0 }} />
           </div>
         ) : (
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button
-              onClick={(e) => { e.stopPropagation(); handleFavorite(); }}
-              className={`p-1.5 rounded hover:bg-gray-200 ${item.is_favorite ? "text-yellow-500" : "text-gray-400 hover:text-yellow-500"}`}
-              title={item.is_favorite ? "取消收藏" : "收藏"}
-            >
-              <Star size={14} fill={item.is_favorite ? "currentColor" : "none"} />
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); handleDelete(); }}
-              className="p-1.5 rounded hover:bg-gray-200 text-gray-400 hover:text-red-500"
-              title="删除"
-            >
-              <Trash2 size={14} />
-            </button>
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div onClick={(e) => e.stopPropagation()}>
+              <Button
+                type="text"
+                size="mini"
+                icon={item.is_favorite ? <IconStarFill style={{ fontSize: 16 }} /> : <IconStar style={{ fontSize: 16 }} />}
+                onClick={handleFavorite}
+                style={{ color: item.is_favorite ? "rgb(234 179 8)" : "rgb(156 163 175)" }}
+              />
+            </div>
+            <div onClick={(e) => e.stopPropagation()}>
+              <Button
+                type="text"
+                size="mini"
+                icon={<IconDelete style={{ fontSize: 16 }} />}
+                onClick={handleDelete}
+                style={{ color: "rgb(156 163 175)" }}
+                className="hover:!text-red-500"
+              />
+            </div>
           </div>
         )}
       </div>
