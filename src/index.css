@@ -8,9 +8,21 @@
   padding: 0;
 }
 
+html {
+  background: transparent;
+  overflow: hidden;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: transparent;
   overflow: hidden;
   user-select: none;
+}
+
+#root {
+  background: transparent;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
