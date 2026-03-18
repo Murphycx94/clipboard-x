@@ -16,9 +16,9 @@ export function MainPanel() {
   const [view, setView] = useState<View>("main");
 
   return (
-    <div className="flex flex-col h-screen bg-white rounded-xl shadow-2xl overflow-hidden border border-gray-200">
+    <div className="flex flex-col flex-1 bg-white rounded-xl overflow-hidden">
       {/* Header — data-tauri-drag-region 使整行可拖动 */}
-      <div data-tauri-drag-region className="flex items-center justify-between px-4 py-3 border-b border-gray-100 cursor-move select-none">
+      <div data-tauri-drag-region className="flex items-center justify-between px-4 py-3 border-b border-gray-100 select-none">
         <span className="font-semibold text-gray-800 text-sm">ClipboardX</span>
         <div className="flex items-center gap-1">
           <button
