@@ -69,14 +69,14 @@ export function ClipboardItemCard({ item, focused, onHover }: Props) {
         onClick={handleCopy}
         onMouseEnter={onHover}
         className={`group flex items-center gap-3 px-4 py-3 transition-colors cursor-pointer ${
-          copied ? "bg-indigo-50" : focused ? "bg-[#ecedf0]" : "hover:bg-gray-100"
+          copied ? "bg-indigo-50 dark:bg-indigo-900/20" : focused ? "bg-[#ecedf0] dark:bg-[#2a2a2b]" : "hover:bg-gray-100 dark:hover:bg-[#2a2a2b]"
         }`}
       >
-        <span className="text-xs text-gray-400 w-10 shrink-0">{timeStr}</span>
+        <span className="text-xs text-gray-400 dark:text-gray-500 w-10 shrink-0">{timeStr}</span>
 
         <div className="flex-1 min-w-0">
           {item.content_type === "text" ? (
-            <p className="text-sm text-gray-800 truncate" title={item.text_content ?? ""}>
+            <p className="text-sm text-gray-800 dark:text-gray-100 truncate" title={item.text_content ?? ""}>
               {item.text_content}
             </p>
           ) : (
@@ -86,7 +86,7 @@ export function ClipboardItemCard({ item, focused, onHover }: Props) {
                   <img
                     src={`data:image/png;base64,${item.image_thumbnail}`}
                     alt="clipboard image"
-                    className="h-10 w-16 object-cover rounded border border-gray-200 cursor-pointer"
+                    className="h-10 w-16 object-cover rounded border border-gray-200 dark:border-gray-600 cursor-pointer"
                     onClick={handleImageClick}
                   />
                   <Image.Preview
@@ -96,11 +96,11 @@ export function ClipboardItemCard({ item, focused, onHover }: Props) {
                   />
                 </>
               )}
-              <span className="text-xs text-gray-400">[图片]</span>
+              <span className="text-xs text-gray-400 dark:text-gray-500">[图片]</span>
             </div>
           )}
           {item.note && (
-            <p className="text-xs text-gray-400 mt-0.5 truncate">备注：{item.note}</p>
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5 truncate">备注：{item.note}</p>
           )}
         </div>
 

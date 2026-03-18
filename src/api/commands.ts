@@ -30,3 +30,9 @@ export const updateNote = (id: number, note: string): Promise<void> =>
 
 export const getImageBase64 = (id: number): Promise<string | null> =>
   invoke("get_image_base64", { id });
+
+export const updateRetention = (days: number): Promise<void> =>
+  invoke("update_retention", { days });
+
+export const clearHistory = (): Promise<number> =>
+  invoke("clear_history");

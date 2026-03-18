@@ -29,18 +29,18 @@ export function ArchivePage() {
 
   return (
     <div className="overflow-y-auto flex-1">
-      <Collapse bordered={false} style={{ background: "white" }}>
+      <Collapse bordered={false} style={{ background: "transparent" }}>
         {groups.map((group) => (
           <CollapseItem
             key={group.date}
             header={
-              <span className="text-sm font-medium text-gray-600">
+              <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
                 {group.date}
-                <span className="ml-2 text-xs text-gray-400">{group.items.length} 条</span>
+                <span className="ml-2 text-xs text-gray-400 dark:text-gray-500">{group.items.length} 条</span>
               </span>
             }
             name={group.date}
-            style={{ borderBottom: "1px solid rgb(243 244 246)" }}
+            style={{ borderBottom: "1px solid rgb(243 244 246 / 0.1)" }}
           >
             {group.items.map((item) => (
               <ClipboardItemCard key={item.id} item={item} />

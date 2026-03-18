@@ -24,6 +24,7 @@ pub struct DateGroup {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     pub hotkey: String,
+    pub retention_days: i64, // 0 = 永久保留
 }
 
 pub struct Database(pub Mutex<Connection>);
@@ -50,7 +51,8 @@ impl Database {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            INSERT OR IGNORE INTO settings(key, value) VALUES ('hotkey', 'CmdOrCtrl+Shift+V');",
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('hotkey', 'CmdOrCtrl+Shift+V');
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('retention_days', '0');",
         )?;
         Ok(Database(Mutex::new(conn)))
     }
@@ -193,7 +195,44 @@ impl Database {
             [],
             |row| row.get(0),
         )?;
-        Ok(AppSettings { hotkey })
+        let retention_days: i64 = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='retention_days'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|v| v.parse().unwrap_or(0))
+            .unwrap_or(0);
+        Ok(AppSettings { hotkey, retention_days })
+    }
+
+    pub fn update_retention(&self, days: i64) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('retention_days', ?1)",
+            params![days.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_history(&self) -> Result<usize> {
+        let conn = self.0.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM clipboard_items WHERE is_favorite = 0",
+            [],
+        )?;
+        Ok(count)
+    }
+
+    pub fn cleanup_expired(&self, retention_days: i64) -> Result<()> {
+        if retention_days == 0 { return Ok(()); }
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "DELETE FROM clipboard_items WHERE is_favorite = 0
+             AND created_at < datetime('now', ?1)",
+            params![format!("-{} days", retention_days)],
+        )?;
+        Ok(())
     }
 
     pub fn update_hotkey(&self, hotkey: &str) -> Result<()> {

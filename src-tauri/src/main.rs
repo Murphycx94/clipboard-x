@@ -76,6 +76,11 @@ fn main() {
             let db_path = app_data_dir.join("clipboardx.db");
             let db = Arc::new(Database::new(db_path.to_str().unwrap())?);
 
+            // Cleanup expired items on startup
+            if let Ok(s) = db.get_settings() {
+                let _ = db.cleanup_expired(s.retention_days);
+            }
+
             // Start clipboard monitor
             start_clipboard_monitor(db.clone());
 
@@ -135,6 +140,8 @@ fn main() {
             update_hotkey,
             update_note,
             get_image_base64,
+            update_retention,
+            clear_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
