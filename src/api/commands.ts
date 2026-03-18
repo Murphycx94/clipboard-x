@@ -27,3 +27,6 @@ export const updateHotkey = (hotkey: string): Promise<void> =>
 
 export const updateNote = (id: number, note: string): Promise<void> =>
   invoke("update_note", { id, note });
+
+export const getImageBase64 = (id: number): Promise<string | null> =>
+  invoke("get_image_base64", { id });

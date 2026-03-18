@@ -159,6 +159,15 @@ impl Database {
         Ok(stmt.query_row(params![id], |row| row.get(0)).ok())
     }
 
+    pub fn get_image_base64(&self, id: i64) -> Result<Option<String>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT image_data FROM clipboard_items WHERE id=?1")?;
+        Ok(stmt.query_row(params![id], |row| {
+            let bytes: Option<Vec<u8>> = row.get(0)?;
+            Ok(bytes.map(|b| BASE64.encode(b)))
+        }).ok().flatten())
+    }
+
     pub fn get_text_content(&self, id: i64) -> Result<Option<String>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare("SELECT text_content FROM clipboard_items WHERE id=?1")?;

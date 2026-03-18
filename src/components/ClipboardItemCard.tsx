@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button, Modal, Input } from "@arco-design/web-react";
+import { Button, Modal, Input, Image } from "@arco-design/web-react";
 import { IconStar, IconStarFill, IconDelete, IconEdit } from "@arco-design/web-react/icon";
 import { Check } from "lucide-react";
 import { ClipboardItem } from "../types";
-import { copyToClipboard, toggleFavorite, deleteItem, updateNote } from "../api/commands";
+import { copyToClipboard, toggleFavorite, deleteItem, updateNote, getImageBase64 } from "../api/commands";
 import { useQueryClient } from "@tanstack/react-query";
 
 interface Props {
@@ -17,6 +17,17 @@ export function ClipboardItemCard({ item, focused, onHover }: Props) {
   const [copied, setCopied] = useState(false);
   const [noteModalVisible, setNoteModalVisible] = useState(false);
   const [noteInput, setNoteInput] = useState("");
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [fullImageSrc, setFullImageSrc] = useState<string | null>(null);
+
+  const handleImageClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!fullImageSrc) {
+      const base64 = await getImageBase64(item.id);
+      setFullImageSrc(base64 ? `data:image/png;base64,${base64}` : `data:image/png;base64,${item.image_thumbnail}`);
+    }
+    setPreviewVisible(true);
+  };
 
   const handleCopy = async () => {
     await copyToClipboard(item.id);
@@ -71,11 +82,19 @@ export function ClipboardItemCard({ item, focused, onHover }: Props) {
           ) : (
             <div className="flex items-center gap-2">
               {item.image_thumbnail && (
-                <img
-                  src={`data:image/png;base64,${item.image_thumbnail}`}
-                  alt="clipboard image"
-                  className="h-10 w-16 object-cover rounded border border-gray-200"
-                />
+                <>
+                  <img
+                    src={`data:image/png;base64,${item.image_thumbnail}`}
+                    alt="clipboard image"
+                    className="h-10 w-16 object-cover rounded border border-gray-200 cursor-pointer"
+                    onClick={handleImageClick}
+                  />
+                  <Image.Preview
+                    visible={previewVisible}
+                    src={fullImageSrc ?? ""}
+                    onVisibleChange={setPreviewVisible}
+                  />
+                </>
               )}
               <span className="text-xs text-gray-400">[图片]</span>
             </div>
