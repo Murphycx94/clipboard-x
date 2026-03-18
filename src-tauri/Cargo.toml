@@ -1,0 +1,32 @@
+[package]
+name = "clipboardx"
+version = "0.1.0"
+description = "ClipboardX - Clipboard History Manager"
+authors = []
+edition = "2021"
+
+[[bin]]
+name = "clipboardx"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+once_cell = "1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

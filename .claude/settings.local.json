@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tauri:*)",
+      "Bash(python3 -c \"from PIL import Image; print\\(''PIL OK''\\)\")",
+      "Bash(cargo build:*)",
+      "Bash(npm run:*)",
+      "Bash(grep opacity:*)",
+      "Bash(grep -r opacity /Users/murphy/Desktop/dev/ClipboardX/src-tauri/target/debug/build/clipboardx-*/out/)",
+      "Bash(grep -r \"set_opacity\\\\|opacity\" /Users/murphy/Desktop/dev/ClipboardX/src-tauri/target/debug/build/clipboardx-*/out/)",
+      "Bash(cargo doc:*)",
+      "Read(//Users/murphy/.cargo/registry/src/**)",
+      "Bash(grep -r \"fn set_opacity\\\\|pub fn opacity\" ~/.cargo/registry/src/*/tauri-2*/src/)",
+      "Bash(find ~/.cargo/registry/src -name *.rs -path */tauri-2*)",
+      "Bash(find ~/.cargo/registry/src -name window.rs -path *tauri*)"
+    ]
+  }
+}
