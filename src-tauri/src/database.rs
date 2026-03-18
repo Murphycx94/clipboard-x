@@ -195,4 +195,13 @@ impl Database {
         )?;
         Ok(())
     }
+
+    pub fn update_note(&self, id: i64, note: &str) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE clipboard_items SET note = ?1 WHERE id = ?2",
+            params![note, id],
+        )?;
+        Ok(())
+    }
 }

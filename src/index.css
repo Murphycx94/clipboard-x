@@ -9,7 +9,7 @@
 }
 
 html {
-  background: transparent;
+  /* background: transparent; */
   overflow: hidden;
 }
 
@@ -21,25 +21,17 @@ body {
 }
 
 #root {
-  background: transparent;
+  /* background: transparent; */
   height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
-::-webkit-scrollbar {
-  width: 4px;
+.arco-modal-footer {
+  border-top: none !important;
+  padding: 0 !important;
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.15);
-  border-radius: 2px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.25);
+.arco-modal-content {
+  padding: 12px !important;
 }

@@ -133,6 +133,7 @@ fn main() {
             delete_item,
             get_settings,
             update_hotkey,
+            update_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

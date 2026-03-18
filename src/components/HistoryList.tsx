@@ -24,7 +24,11 @@ export function HistoryList() {
   const filtered = items.filter((item) => {
     if (showImageOnly && item.content_type !== "image") return false;
     if (!searchQuery) return true;
-    return item.text_content?.toLowerCase().includes(searchQuery.toLowerCase());
+    const q = searchQuery.toLowerCase();
+    return (
+      item.text_content?.toLowerCase().includes(q) ||
+      item.note?.toLowerCase().includes(q)
+    );
   });
 
   // 焦点项滚动到可见区域
