@@ -6,7 +6,7 @@ import { useClipboardStore } from "../store/useClipboardStore";
 import { HistoryList } from "./HistoryList";
 import { FavoriteList } from "./FavoriteList";
 import { ArchivePage } from "./ArchivePage";
-import { SettingsPanel } from "./SettingsPanel";
+import { SettingsPanel, getHideOnBlur } from "./SettingsPanel";
 import { PanelHeader } from "./PanelHeader";
 
 const hideWindow = () => getCurrentWindow().setPosition(new PhysicalPosition(-10000, -10000));
@@ -35,18 +35,18 @@ export function MainPanel() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [setActiveTab, activeTab]);
 
-  // useEffect(() => {
-  //   const win = getCurrentWindow();
-  //   let unlisten: (() => void) | undefined;
-  //   win.onFocusChanged(({ payload: focused }) => {
-  //     if (!focused) {
-  //       hideWindow();
-  //     } else {
-  //       setFocusedIndex(0);
-  //     }
-  //   }).then((fn) => { unlisten = fn; });
-  //   return () => { unlisten?.(); };
-  // }, []);
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    win.onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        if (getHideOnBlur()) hideWindow();
+      } else {
+        setFocusedIndex(0);
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
 
   return (
     <div className="flex flex-col flex-1 bg-white rounded-xl overflow-hidden">

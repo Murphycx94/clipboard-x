@@ -18,7 +18,10 @@ export function PanelHeader({ view, onViewChange }: Props) {
       className="flex items-center justify-between px-4 py-2 border-b border-gray-100 select-none"
       style={{ minHeight: 44 }}
     >
-      <span className="font-semibold text-gray-800 text-sm">ClipboardX</span>
+      <span
+        className="font-semibold text-gray-800 text-sm cursor-pointer"
+        onClick={() => onViewChange("main")}
+      >ClipboardX</span>
       <div className="flex items-center gap-0.5">
         <Button
           type="text"
