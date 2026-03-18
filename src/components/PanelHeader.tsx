@@ -15,11 +15,11 @@ export function PanelHeader({ view, onViewChange }: Props) {
   return (
     <div
       data-tauri-drag-region
-      className="flex items-center justify-between px-4 py-2 border-b border-gray-100 select-none"
+      className="flex items-center justify-between px-4 py-2 border-b border-gray-100 dark:border-gray-700/50 select-none"
       style={{ minHeight: 44 }}
     >
       <span
-        className="font-semibold text-gray-800 text-sm cursor-pointer"
+        className="font-semibold text-gray-800 dark:text-gray-100 text-sm cursor-pointer"
         onClick={() => onViewChange("main")}
       >ClipboardX</span>
       <div className="flex items-center gap-0.5">

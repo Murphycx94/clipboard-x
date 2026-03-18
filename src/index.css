@@ -39,3 +39,14 @@ body {
 .arco-list-item-meta-description {
   @apply text-xs;
 }
+
+/* Arco Collapse dark mode */
+html.dark .arco-collapse-item-header {
+  background: transparent;
+}
+
+/* Search input dark background */
+html.dark .arco-input-wrapper {
+  background: rgb(42 42 43) !important;
+}
+

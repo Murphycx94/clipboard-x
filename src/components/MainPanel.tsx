@@ -49,7 +49,7 @@ export function MainPanel() {
   }, []);
 
   return (
-    <div className="flex flex-col flex-1 bg-white rounded-xl overflow-hidden">
+    <div className="flex flex-col flex-1 bg-white dark:bg-[#1d1d1f] rounded-xl overflow-hidden">
       <PanelHeader view={view} onViewChange={setView} />
 
       {view === "archive" ? (
@@ -58,7 +58,7 @@ export function MainPanel() {
         <SettingsPanel />
       ) : (
         <div className="flex flex-col flex-1 min-h-0">
-          <div className="flex items-center gap-4 px-4 py-3 border-b border-gray-100">
+          <div className="flex items-center gap-4 px-4 py-3 border-b border-gray-100 dark:border-gray-700/50">
             <Radio.Group
               type="button"
               value={activeTab}

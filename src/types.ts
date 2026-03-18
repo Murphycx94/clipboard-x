@@ -17,4 +17,5 @@ export interface DateGroup {
 
 export interface AppSettings {
   hotkey: string;
+  retention_days: number; // 0 = 永久保留
 }
