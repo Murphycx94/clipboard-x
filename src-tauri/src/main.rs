@@ -134,6 +134,7 @@ fn main() {
             get_settings,
             update_hotkey,
             update_note,
+            get_image_base64,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

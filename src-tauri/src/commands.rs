@@ -66,3 +66,8 @@ pub fn update_hotkey(hotkey: String, db: DbState) -> Result<(), String> {
 pub fn update_note(id: i64, note: String, db: DbState) -> Result<(), String> {
     db.update_note(id, &note).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn get_image_base64(id: i64, db: DbState) -> Result<Option<String>, String> {
+    db.get_image_base64(id).map_err(|e| e.to_string())
+}
