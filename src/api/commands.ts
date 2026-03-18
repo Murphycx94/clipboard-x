@@ -24,3 +24,6 @@ export const getSettings = (): Promise<AppSettings> =>
 
 export const updateHotkey = (hotkey: string): Promise<void> =>
   invoke("update_hotkey", { hotkey });
+
+export const updateNote = (id: number, note: string): Promise<void> =>
+  invoke("update_note", { id, note });

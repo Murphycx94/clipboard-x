@@ -61,3 +61,8 @@ pub fn get_settings(db: DbState) -> Result<AppSettings, String> {
 pub fn update_hotkey(hotkey: String, db: DbState) -> Result<(), String> {
     db.update_hotkey(&hotkey).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn update_note(id: i64, note: String, db: DbState) -> Result<(), String> {
+    db.update_note(id, &note).map_err(|e| e.to_string())
+}

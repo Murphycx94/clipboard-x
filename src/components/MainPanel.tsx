@@ -35,18 +35,18 @@ export function MainPanel() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [setActiveTab, activeTab]);
 
-  useEffect(() => {
-    const win = getCurrentWindow();
-    let unlisten: (() => void) | undefined;
-    win.onFocusChanged(({ payload: focused }) => {
-      if (!focused) {
-        hideWindow();
-      } else {
-        setFocusedIndex(0);
-      }
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
-  }, []);
+  // useEffect(() => {
+  //   const win = getCurrentWindow();
+  //   let unlisten: (() => void) | undefined;
+  //   win.onFocusChanged(({ payload: focused }) => {
+  //     if (!focused) {
+  //       hideWindow();
+  //     } else {
+  //       setFocusedIndex(0);
+  //     }
+  //   }).then((fn) => { unlisten = fn; });
+  //   return () => { unlisten?.(); };
+  // }, []);
 
   return (
     <div className="flex flex-col flex-1 bg-white rounded-xl overflow-hidden">
