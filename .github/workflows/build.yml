@@ -78,5 +78,5 @@ jobs:
           draft: false
           generate_release_notes: true
           files: |
-            artifacts/macos-build/*
-            artifacts/windows-build/*
+            artifacts/macos-build/**
+            artifacts/windows-build/**
