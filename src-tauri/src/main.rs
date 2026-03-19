@@ -38,12 +38,23 @@ fn toggle_window(app: &tauri::AppHandle) {
             return;
         }
 
-        // 定位到鼠标所在显示器右侧
         if let Some(window) = app.get_webview_window("main") {
             position_window_at_cursor(&window);
         }
 
         panel.show();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            if window.is_visible().unwrap_or(false) {
+                let _ = window.hide();
+            } else {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
     }
 }
 
@@ -84,6 +95,13 @@ fn hide_window(app: tauri::AppHandle) {
             panel.order_out(None);
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.hide();
+        }
+    }
 }
 
 fn main() {
@@ -95,10 +113,16 @@ fn main() {
         NSApp().setActivationPolicy_(NSApplicationActivationPolicyAccessory);
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_nspanel::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+
+    builder
         .setup(|app| {
             // Init database
             let app_data_dir = app.path().app_data_dir()?;
