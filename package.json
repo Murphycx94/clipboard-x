@@ -8,7 +8,9 @@
     "dev-vite": "vite",
     "build-vite": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri dev"
+    "tauri": "tauri dev",
+    "build": "tauri build",
+    "build:win": "tauri build --target x86_64-pc-windows-msvc"
   },
   "dependencies": {
     "@arco-design/web-react": "^2.66.11",
