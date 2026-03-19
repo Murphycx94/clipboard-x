@@ -6,10 +6,11 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "npm run dev-vite",
+    "beforeBuildCommand": "npm run build-vite"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -20,9 +21,7 @@
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,
-        "visible": true,
-        "x": -10000,
-        "y": -10000,
+        "visible": false,
         "skipTaskbar": true
       }
     ],

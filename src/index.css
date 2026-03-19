@@ -8,9 +8,64 @@
   padding: 0;
 }
 
+html {
+  /* background: transparent; */
+  overflow: hidden;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: transparent;
   overflow: hidden;
   user-select: none;
 }
+
+#root {
+  /* background: transparent; */
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.arco-modal-footer {
+  border-top: none !important;
+  padding: 0 !important;
+}
+
+.arco-modal-content {
+  padding: 12px !important;
+}
+
+.arco-list-item-meta-description {
+  @apply text-xs;
+}
+
+.arco-btn-text {
+  box-shadow: none !important;
+}
+
+/* Arco Collapse dark mode */
+/* html.dark .arco-collapse-item-header {
+  background: transparent;
+} */
+
+/* Search input dark background */
+/* html.dark .arco-input-wrapper {
+  background: rgb(42 42 43) !important;
+  border-color: rgb(55 55 57) !important;
+}
+
+html.dark .arco-input-wrapper:hover,
+html.dark .arco-input-wrapper.arco-input-focus {
+  border-color: rgb(99 102 241) !important;
+}
+
+html.dark .arco-input {
+  background: transparent !important;
+  color: rgb(229 231 235) !important;
+}
+
+html.dark .arco-input::placeholder {
+  color: rgb(107 114 128) !important;
+} */
+

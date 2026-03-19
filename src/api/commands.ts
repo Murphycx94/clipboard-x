@@ -24,3 +24,18 @@ export const getSettings = (): Promise<AppSettings> =>
 
 export const updateHotkey = (hotkey: string): Promise<void> =>
   invoke("update_hotkey", { hotkey });
+
+export const updateNote = (id: number, note: string): Promise<void> =>
+  invoke("update_note", { id, note });
+
+export const getImageBase64 = (id: number): Promise<string | null> =>
+  invoke("get_image_base64", { id });
+
+export const updateRetention = (days: number): Promise<void> =>
+  invoke("update_retention", { days });
+
+export const clearHistory = (): Promise<number> =>
+  invoke("clear_history");
+
+export const hideWindow = (): Promise<void> =>
+  invoke("hide_window");

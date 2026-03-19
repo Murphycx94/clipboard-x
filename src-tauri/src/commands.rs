@@ -61,3 +61,23 @@ pub fn get_settings(db: DbState) -> Result<AppSettings, String> {
 pub fn update_hotkey(hotkey: String, db: DbState) -> Result<(), String> {
     db.update_hotkey(&hotkey).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn update_note(id: i64, note: String, db: DbState) -> Result<(), String> {
+    db.update_note(id, &note).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_image_base64(id: i64, db: DbState) -> Result<Option<String>, String> {
+    db.get_image_base64(id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_retention(days: i64, db: DbState) -> Result<(), String> {
+    db.update_retention(days).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn clear_history(db: DbState) -> Result<usize, String> {
+    db.clear_history().map_err(|e| e.to_string())
+}

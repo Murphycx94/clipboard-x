@@ -1,29 +1,38 @@
 import { useQuery } from "@tanstack/react-query";
+import { Spin, Empty } from "@arco-design/web-react";
 import { getFavoriteItems } from "../api/commands";
 import { ClipboardItemCard } from "./ClipboardItemCard";
+import { useClipboardStore } from "../store/useClipboardStore";
 
 export function FavoriteList() {
+  const showImageOnly = useClipboardStore((s) => s.showImageOnly);
   const { data: items = [], isLoading } = useQuery({
     queryKey: ["favorite-items"],
     queryFn: getFavoriteItems,
     refetchInterval: 2000,
   });
 
+  const filtered = showImageOnly ? items.filter((item) => item.content_type === "image") : items;
+
   if (isLoading) {
-    return <div className="p-4 text-sm text-gray-400">加载中...</div>;
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <Spin size={20} />
+      </div>
+    );
   }
 
-  if (items.length === 0) {
+  if (filtered.length === 0) {
     return (
-      <div className="p-8 text-center text-sm text-gray-400">
-        暂无收藏内容，点击历史记录中的 ★ 按钮添加收藏
+      <div className="flex-1 flex items-center justify-center">
+        <Empty description="暂无收藏，点击条目右侧 ★ 添加" />
       </div>
     );
   }
 
   return (
     <div className="overflow-y-auto flex-1">
-      {items.map((item) => (
+      {filtered.map((item) => (
         <ClipboardItemCard key={item.id} item={item} />
       ))}
     </div>
