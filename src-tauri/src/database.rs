@@ -52,7 +52,7 @@ impl Database {
                 value TEXT NOT NULL
             );
             INSERT OR IGNORE INTO settings(key, value) VALUES ('hotkey', 'CmdOrCtrl+Shift+V');
-            INSERT OR IGNORE INTO settings(key, value) VALUES ('retention_days', '0');",
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('retention_days', '7');",
         )?;
         Ok(Database(Mutex::new(conn)))
     }
@@ -97,7 +97,7 @@ impl Database {
         let conn = self.0.lock().unwrap();
         let today = Local::now().format("%Y-%m-%d").to_string();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, text_content, image_thumbnail, created_at, is_favorite, note
+            "SELECT id, content_type, SUBSTR(text_content, 1, 100), image_thumbnail, created_at, is_favorite, note
              FROM clipboard_items
              WHERE date(created_at) = ?1
              ORDER BY created_at DESC",
@@ -111,7 +111,7 @@ impl Database {
         let conn = self.0.lock().unwrap();
         let today = Local::now().format("%Y-%m-%d").to_string();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, text_content, image_thumbnail, created_at, is_favorite, note
+            "SELECT id, content_type, SUBSTR(text_content, 1, 100), image_thumbnail, created_at, is_favorite, note
              FROM clipboard_items
              WHERE date(created_at) < ?1
              ORDER BY created_at DESC",
@@ -134,7 +134,7 @@ impl Database {
     pub fn get_favorite_items(&self) -> Result<Vec<ClipboardItem>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, text_content, image_thumbnail, created_at, is_favorite, note
+            "SELECT id, content_type, SUBSTR(text_content, 1, 100), image_thumbnail, created_at, is_favorite, note
              FROM clipboard_items
              WHERE is_favorite = 1
              ORDER BY created_at DESC",
