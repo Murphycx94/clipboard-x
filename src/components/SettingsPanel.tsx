@@ -31,8 +31,8 @@ export function getHideOnBlur(): boolean {
 }
 
 const RETENTION_OPTIONS = [
+  { label: "一周", value: 7 },
   { label: "一个月", value: 30 },
-  { label: "半年", value: 180 },
   { label: "一年", value: 365 },
   { label: "永久保留", value: 0 },
 ];
@@ -93,7 +93,7 @@ export function SettingsPanel() {
     });
   };
 
-  const currentRetention = settings?.retention_days ?? 0;
+  const currentRetention = settings?.retention_days ?? 7;
 
   return (
     <div className="flex-1 overflow-y-auto">
