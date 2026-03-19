@@ -40,13 +40,32 @@ body {
   @apply text-xs;
 }
 
-/* Arco Collapse dark mode */
-html.dark .arco-collapse-item-header {
-  background: transparent;
+.arco-btn-text {
+  box-shadow: none !important;
 }
 
+/* Arco Collapse dark mode */
+/* html.dark .arco-collapse-item-header {
+  background: transparent;
+} */
+
 /* Search input dark background */
-html.dark .arco-input-wrapper {
+/* html.dark .arco-input-wrapper {
   background: rgb(42 42 43) !important;
+  border-color: rgb(55 55 57) !important;
 }
+
+html.dark .arco-input-wrapper:hover,
+html.dark .arco-input-wrapper.arco-input-focus {
+  border-color: rgb(99 102 241) !important;
+}
+
+html.dark .arco-input {
+  background: transparent !important;
+  color: rgb(229 231 235) !important;
+}
+
+html.dark .arco-input::placeholder {
+  color: rgb(107 114 128) !important;
+} */
 

@@ -13,14 +13,32 @@ import { hideWindow } from "../api/commands";
 type View = "main" | "archive" | "settings";
 
 export function MainPanel() {
-  const { activeTab, setActiveTab, searchQuery, setSearchQuery, setFocusedIndex, showImageOnly, toggleShowImageOnly } = useClipboardStore();
+  const {
+    activeTab,
+    setActiveTab,
+    searchQuery,
+    setSearchQuery,
+    setFocusedIndex,
+    showImageOnly,
+    toggleShowImageOnly,
+  } = useClipboardStore();
   const [view, setView] = useState<View>("main");
   const inputRef = useRef<{ focus: () => void }>(null);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "ArrowLeft") { setActiveTab("history"); return; }
-      if (e.key === "ArrowRight") { setActiveTab("favorites"); return; }
+      if (e.key === "Escape") {
+        hideWindow();
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        setActiveTab("history");
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        setActiveTab("favorites");
+        return;
+      }
       if (e.key === "Tab") {
         e.preventDefault();
         setActiveTab(activeTab === "history" ? "favorites" : "history");
@@ -37,14 +55,20 @@ export function MainPanel() {
   useEffect(() => {
     const win = getCurrentWindow();
     let unlisten: (() => void) | undefined;
-    win.onFocusChanged(({ payload: focused }) => {
-      if (!focused) {
-        if (getHideOnBlur()) hideWindow();
-      } else {
-        setFocusedIndex(0);
-      }
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    win
+      .onFocusChanged(({ payload: focused }) => {
+        if (!focused) {
+          if (getHideOnBlur()) hideWindow();
+        } else {
+          setFocusedIndex(0);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
   return (
@@ -71,24 +95,38 @@ export function MainPanel() {
               ref={inputRef as any}
               size="small"
               placeholder="搜索..."
-              prefix={<IconSearch style={{ color: "rgb(156 163 175)", fontSize: 16 }} />}
+              prefix={
+                <IconSearch
+                  style={{ color: "rgb(156 163 175)", fontSize: 16 }}
+                />
+              }
               suffix={
                 <div className="flex items-center gap-1">
                   {searchQuery && (
                     <IconClose
-                      style={{ color: "rgb(156 163 175)", fontSize: 14, cursor: "pointer" }}
+                      style={{
+                        color: "rgb(156 163 175)",
+                        fontSize: 14,
+                        cursor: "pointer",
+                      }}
                       onClick={() => setSearchQuery("")}
                     />
                   )}
                   <IconImage
-                    style={{ fontSize: 15, cursor: "pointer", color: showImageOnly ? "rgb(99 102 241)" : "rgb(156 163 175)" }}
+                    style={{
+                      fontSize: 15,
+                      cursor: "pointer",
+                      color: showImageOnly
+                        ? "rgb(99 102 241)"
+                        : "rgb(156 163 175)",
+                    }}
                     onClick={toggleShowImageOnly}
                   />
                 </div>
               }
               value={searchQuery}
               onChange={setSearchQuery}
-              style={{ flex: 1, background: "rgb(249 250 251)", border: "none", borderRadius: 8 }}
+              className="flex-1"
             />
           </div>
 
