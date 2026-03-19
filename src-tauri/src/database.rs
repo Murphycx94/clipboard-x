@@ -24,6 +24,7 @@ pub struct DateGroup {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     pub hotkey: String,
+    pub retention_days: i64, // 0 = 永久保留
 }
 
 pub struct Database(pub Mutex<Connection>);
@@ -50,7 +51,8 @@ impl Database {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            INSERT OR IGNORE INTO settings(key, value) VALUES ('hotkey', 'CmdOrCtrl+Shift+V');",
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('hotkey', 'CmdOrCtrl+Shift+V');
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('retention_days', '7');",
         )?;
         Ok(Database(Mutex::new(conn)))
     }
@@ -95,7 +97,7 @@ impl Database {
         let conn = self.0.lock().unwrap();
         let today = Local::now().format("%Y-%m-%d").to_string();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, text_content, image_thumbnail, created_at, is_favorite, note
+            "SELECT id, content_type, SUBSTR(text_content, 1, 100), image_thumbnail, created_at, is_favorite, note
              FROM clipboard_items
              WHERE date(created_at) = ?1
              ORDER BY created_at DESC",
@@ -109,7 +111,7 @@ impl Database {
         let conn = self.0.lock().unwrap();
         let today = Local::now().format("%Y-%m-%d").to_string();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, text_content, image_thumbnail, created_at, is_favorite, note
+            "SELECT id, content_type, SUBSTR(text_content, 1, 100), image_thumbnail, created_at, is_favorite, note
              FROM clipboard_items
              WHERE date(created_at) < ?1
              ORDER BY created_at DESC",
@@ -132,7 +134,7 @@ impl Database {
     pub fn get_favorite_items(&self) -> Result<Vec<ClipboardItem>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, content_type, text_content, image_thumbnail, created_at, is_favorite, note
+            "SELECT id, content_type, SUBSTR(text_content, 1, 100), image_thumbnail, created_at, is_favorite, note
              FROM clipboard_items
              WHERE is_favorite = 1
              ORDER BY created_at DESC",
@@ -157,6 +159,15 @@ impl Database {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare("SELECT image_data FROM clipboard_items WHERE id=?1")?;
         Ok(stmt.query_row(params![id], |row| row.get(0)).ok())
+    }
+
+    pub fn get_image_base64(&self, id: i64) -> Result<Option<String>> {
+        let conn = self.0.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT image_data FROM clipboard_items WHERE id=?1")?;
+        Ok(stmt.query_row(params![id], |row| {
+            let bytes: Option<Vec<u8>> = row.get(0)?;
+            Ok(bytes.map(|b| BASE64.encode(b)))
+        }).ok().flatten())
     }
 
     pub fn get_text_content(&self, id: i64) -> Result<Option<String>> {
@@ -184,7 +195,44 @@ impl Database {
             [],
             |row| row.get(0),
         )?;
-        Ok(AppSettings { hotkey })
+        let retention_days: i64 = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='retention_days'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|v| v.parse().unwrap_or(0))
+            .unwrap_or(0);
+        Ok(AppSettings { hotkey, retention_days })
+    }
+
+    pub fn update_retention(&self, days: i64) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('retention_days', ?1)",
+            params![days.to_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_history(&self) -> Result<usize> {
+        let conn = self.0.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM clipboard_items WHERE is_favorite = 0",
+            [],
+        )?;
+        Ok(count)
+    }
+
+    pub fn cleanup_expired(&self, retention_days: i64) -> Result<()> {
+        if retention_days == 0 { return Ok(()); }
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "DELETE FROM clipboard_items WHERE is_favorite = 0
+             AND created_at < datetime('now', ?1)",
+            params![format!("-{} days", retention_days)],
+        )?;
+        Ok(())
     }
 
     pub fn update_hotkey(&self, hotkey: &str) -> Result<()> {
@@ -192,6 +240,15 @@ impl Database {
         conn.execute(
             "INSERT OR REPLACE INTO settings(key, value) VALUES ('hotkey', ?1)",
             params![hotkey],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_note(&self, id: i64, note: &str) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "UPDATE clipboard_items SET note = ?1 WHERE id = ?2",
+            params![note, id],
         )?;
         Ok(())
     }
