@@ -5,12 +5,12 @@ on:
     branches:
       - main
 
-permissions:
-  contents: write
-
 jobs:
-  check-and-tag:
+  check:
     runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.tag_check.outputs.exists == 'false' }}
+      version: ${{ steps.pkg.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,12 +25,18 @@ jobs:
         run: |
           if git ls-remote --tags origin "refs/tags/v${{ steps.pkg.outputs.version }}" | grep -q .; then
             echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.pkg.outputs.version }} already exists, skipping release."
           else
             echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.pkg.outputs.version }} not found, will trigger release."
           fi
 
-      - name: Push tag to trigger build
-        if: steps.tag_check.outputs.exists == 'false'
-        run: |
-          git tag "v${{ steps.pkg.outputs.version }}"
-          git push origin "v${{ steps.pkg.outputs.version }}"
+  build:
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+    secrets: inherit
+    permissions:
+      contents: write
