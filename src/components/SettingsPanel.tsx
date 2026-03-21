@@ -17,6 +17,7 @@ import {
   IconDelete,
   IconMessage,
   IconFile,
+  IconRefresh,
 } from "@arco-design/web-react/icon";
 import {
   getSettings,
@@ -29,6 +30,9 @@ import {
 } from "../api/commands";
 import { type Theme, getTheme, setTheme } from "../hooks/useTheme";
 import { isMac } from "../utils/platform";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 
 const HIDE_ON_BLUR_KEY = "clipboardx_hide_on_blur";
 
@@ -210,6 +214,40 @@ export function SettingsPanel() {
   const [currentTheme, setCurrentTheme] = useState<Theme>(getTheme);
   const [telegramModalVisible, setTelegramModalVisible] = useState(false);
 
+  const [appVersion, setAppVersion] = useState("");
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateModal, setUpdateModal] = useState<{ visible: boolean; version: string; body: string; install: () => Promise<void> }>({
+    visible: false, version: "", body: "", install: async () => {},
+  });
+
+  useEffect(() => {
+    getVersion().then(setAppVersion);
+  }, []);
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    try {
+      const update = await check();
+      if (update) {
+        setUpdateModal({
+          visible: true,
+          version: update.version,
+          body: update.body ?? "",
+          install: async () => {
+            await update.downloadAndInstall();
+            await relaunch();
+          },
+        });
+      } else {
+        Message.success("当前已是最新版本");
+      }
+    } catch {
+      Message.error("检查更新失败，请稍后重试");
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
   const hotKeyMutation = useMutation({
     mutationFn: updateHotkey,
     onSuccess: () => {
@@ -342,6 +380,25 @@ export function SettingsPanel() {
 
         <List.Item
           extra={
+            <Button
+              size="small"
+              loading={checkingUpdate}
+              icon={<IconRefresh />}
+              onClick={handleCheckUpdate}
+            >
+              检查更新
+            </Button>
+          }
+        >
+          <List.Item.Meta
+            avatar={<IconSettings style={{ fontSize: 16, color: "rgb(107 114 128)" }} />}
+            title="当前版本"
+            description={appVersion ? `v${appVersion}` : "加载中…"}
+          />
+        </List.Item>
+
+        <List.Item
+          extra={
             <Button size="small" onClick={() => setTelegramModalVisible(true)}>
               {isConfigured ? "已配置" : "设置"}
             </Button>
@@ -381,6 +438,44 @@ export function SettingsPanel() {
         initialTokenMasked={settings?.telegram_token_masked ?? ""}
         initialChatId={settings?.telegram_chat_id ?? ""}
       />
+
+      <Modal
+        title={`发现新版本 v${updateModal.version}`}
+        visible={updateModal.visible}
+        onCancel={() => setUpdateModal((s) => ({ ...s, visible: false }))}
+        style={{ width: 360 }}
+        autoFocus={false}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button onClick={() => setUpdateModal((s) => ({ ...s, visible: false }))}>
+              稍后再说
+            </Button>
+            <Button
+              type="primary"
+              onClick={async () => {
+                setUpdateModal((s) => ({ ...s, visible: false }));
+                const hide = Message.loading({ content: "正在下载更新…", duration: 0 });
+                try {
+                  await updateModal.install();
+                } catch {
+                  hide();
+                  Message.error("更新失败，请稍后重试");
+                }
+              }}
+            >
+              立即升级
+            </Button>
+          </div>
+        }
+      >
+        {updateModal.body ? (
+          <pre className="text-xs text-gray-600 dark:text-gray-300 whitespace-pre-wrap">
+            {updateModal.body}
+          </pre>
+        ) : (
+          <p className="text-sm text-gray-500">有新版本可用，是否立即升级？</p>
+        )}
+      </Modal>
     </div>
   );
 }
