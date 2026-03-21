@@ -1,15 +1,15 @@
 import { Button } from "@arco-design/web-react";
 import { IconArchive, IconSettings, IconClose } from "@arco-design/web-react/icon";
-import { hideWindow } from "../api/commands";
 
 type View = "main" | "archive" | "settings";
 
 interface Props {
   view: View;
   onViewChange: (view: View) => void;
+  onClose: () => void;
 }
 
-export function PanelHeader({ view, onViewChange }: Props) {
+export function PanelHeader({ view, onViewChange, onClose }: Props) {
   return (
     <div
       data-tauri-drag-region
@@ -39,7 +39,7 @@ export function PanelHeader({ view, onViewChange }: Props) {
           type="text"
           size="mini"
           icon={<IconClose style={{ fontSize: 16 }} />}
-          onClick={hideWindow}
+          onClick={onClose}
           style={{ color: "rgb(156 163 175)" }}
         />
       </div>
