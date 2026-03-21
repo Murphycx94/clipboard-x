@@ -4,6 +4,7 @@ import { Spin, Empty } from "@arco-design/web-react";
 import { getTodayItems, copyToClipboard, hideWindow } from "../api/commands";
 import { ClipboardItemCard } from "./ClipboardItemCard";
 import { useClipboardStore } from "../store/useClipboardStore";
+import { isShortcutKey } from "../utils/platform";
 
 export function HistoryList() {
   const searchQuery = useClipboardStore((s) => s.searchQuery);
@@ -37,6 +38,17 @@ export function HistoryList() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (filtered.length === 0) return;
+
+      const shortcutDigit = isShortcutKey(e);
+      if (shortcutDigit !== null) {
+        e.preventDefault();
+        const target = filtered[shortcutDigit - 1];
+        if (target) {
+          copyToClipboard(target.id).then(() => hideWindow());
+        }
+        return;
+      }
+
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setFocusedIndex(Math.min(focusedIndex + 1, filtered.length - 1));
@@ -78,6 +90,7 @@ export function HistoryList() {
             item={item}
             focused={index === focusedIndex}
             onHover={() => setFocusedIndex(index)}
+            shortcutIndex={index < 9 ? index + 1 : undefined}
           />
         </div>
       ))}

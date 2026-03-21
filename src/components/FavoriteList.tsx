@@ -1,8 +1,10 @@
+import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Spin, Empty } from "@arco-design/web-react";
-import { getFavoriteItems } from "../api/commands";
+import { getFavoriteItems, copyToClipboard, hideWindow } from "../api/commands";
 import { ClipboardItemCard } from "./ClipboardItemCard";
 import { useClipboardStore } from "../store/useClipboardStore";
+import { isShortcutKey } from "../utils/platform";
 
 export function FavoriteList() {
   const showImageOnly = useClipboardStore((s) => s.showImageOnly);
@@ -13,6 +15,21 @@ export function FavoriteList() {
   });
 
   const filtered = showImageOnly ? items.filter((item) => item.content_type === "image") : items;
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const shortcutDigit = isShortcutKey(e);
+      if (shortcutDigit !== null) {
+        e.preventDefault();
+        const target = filtered[shortcutDigit - 1];
+        if (target) {
+          copyToClipboard(target.id).then(() => hideWindow());
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [filtered]);
 
   if (isLoading) {
     return (
@@ -32,8 +49,12 @@ export function FavoriteList() {
 
   return (
     <div className="overflow-y-auto flex-1">
-      {filtered.map((item) => (
-        <ClipboardItemCard key={item.id} item={item} />
+      {filtered.map((item, index) => (
+        <ClipboardItemCard
+          key={item.id}
+          item={item}
+          shortcutIndex={index < 9 ? index + 1 : undefined}
+        />
       ))}
     </div>
   );

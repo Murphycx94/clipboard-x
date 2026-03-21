@@ -5,14 +5,16 @@ import { Check } from "lucide-react";
 import { ClipboardItem } from "../types";
 import { copyToClipboard, toggleFavorite, deleteItem, updateNote, getImageBase64 } from "../api/commands";
 import { useQueryClient } from "@tanstack/react-query";
+import { getShortcutLabel } from "../utils/platform";
 
 interface Props {
   item: ClipboardItem;
   focused?: boolean;
   onHover?: () => void;
+  shortcutIndex?: number;
 }
 
-export function ClipboardItemCard({ item, focused, onHover }: Props) {
+export function ClipboardItemCard({ item, focused, onHover, shortcutIndex }: Props) {
   const queryClient = useQueryClient();
   const [copied, setCopied] = useState(false);
   const [noteModalVisible, setNoteModalVisible] = useState(false);
@@ -72,7 +74,14 @@ export function ClipboardItemCard({ item, focused, onHover }: Props) {
           copied ? "bg-indigo-50 dark:bg-indigo-900/20" : focused ? "bg-[#ecedf0] dark:bg-[#2a2a2b]" : "hover:bg-gray-100 dark:hover:bg-[#2a2a2b]"
         }`}
       >
-        <span className="text-xs text-gray-400 dark:text-gray-500 w-10 shrink-0">{timeStr}</span>
+        <div className="flex flex-col items-center w-10 shrink-0 gap-0.5">
+          <span className="text-xs text-gray-400 dark:text-gray-500">{timeStr}</span>
+          {shortcutIndex != null && (
+            <span className="text-[10px] text-gray-300 dark:text-gray-600 leading-none">
+              {getShortcutLabel(shortcutIndex)}
+            </span>
+          )}
+        </div>
 
         <div className="flex-1 min-w-0">
           {item.content_type === "text" ? (

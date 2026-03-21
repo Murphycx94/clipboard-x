@@ -23,6 +23,7 @@ import {
   clearHistory,
 } from "../api/commands";
 import { type Theme, getTheme, setTheme } from "../hooks/useTheme";
+import { isMac } from "../utils/platform";
 
 const HIDE_ON_BLUR_KEY = "clipboardx_hide_on_blur";
 
@@ -134,7 +135,7 @@ export function SettingsPanel() {
               />
             }
             title="全局唤出快捷键"
-            description="例如：CmdOrCtrl+Shift+V"
+            description={isMac ? "例如：CmdOrCtrl+Shift+V（Mac 显示为 ⌘⇧V）" : "例如：CmdOrCtrl+Shift+V（Windows 显示为 Ctrl+Shift+V）"}
           />
         </List.Item>
 
