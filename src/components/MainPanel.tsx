@@ -25,10 +25,15 @@ export function MainPanel() {
   const [view, setView] = useState<View>("main");
   const inputRef = useRef<{ focus: () => void }>(null);
 
+  const closeWindow = () => {
+    setView("main");
+    hideWindow();
+  };
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        hideWindow();
+        closeWindow();
         return;
       }
       if (e.key === "ArrowLeft") {
@@ -58,7 +63,7 @@ export function MainPanel() {
     win
       .onFocusChanged(({ payload: focused }) => {
         if (!focused) {
-          if (getHideOnBlur()) hideWindow();
+          if (getHideOnBlur()) closeWindow();
         } else {
           setFocusedIndex(0);
         }
@@ -73,7 +78,7 @@ export function MainPanel() {
 
   return (
     <div className="flex flex-col flex-1 bg-white dark:bg-[#1d1d1f] rounded-xl overflow-hidden">
-      <PanelHeader view={view} onViewChange={setView} />
+      <PanelHeader view={view} onViewChange={setView} onClose={closeWindow} />
 
       {view === "archive" ? (
         <ArchivePage />
