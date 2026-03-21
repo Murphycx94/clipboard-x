@@ -61,8 +61,9 @@ impl Database {
         let conn = self.0.lock().unwrap();
         let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         let rows = conn.execute(
-            "INSERT OR IGNORE INTO clipboard_items (content_type, text_content, created_at, hash)
-             VALUES ('text', ?1, ?2, ?3)",
+            "INSERT INTO clipboard_items (content_type, text_content, created_at, hash)
+             VALUES ('text', ?1, ?2, ?3)
+             ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
             params![content, now, hash],
         )?;
         Ok(rows > 0)
@@ -72,9 +73,10 @@ impl Database {
         let conn = self.0.lock().unwrap();
         let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         let rows = conn.execute(
-            "INSERT OR IGNORE INTO clipboard_items
+            "INSERT INTO clipboard_items
              (content_type, image_data, image_thumbnail, created_at, hash)
-             VALUES ('image', ?1, ?2, ?3, ?4)",
+             VALUES ('image', ?1, ?2, ?3, ?4)
+             ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
             params![image_data, thumbnail, now, hash],
         )?;
         Ok(rows > 0)
