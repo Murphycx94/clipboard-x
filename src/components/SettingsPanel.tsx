@@ -47,7 +47,7 @@ export function SettingsPanel() {
 
   const [hotkey, setHotkey] = useState("");
   const [currentHotkey, setCurrentHotkey] = useState(
-    settings?.hotkey ?? "CmdOrCtrl+Shift+V",
+    settings?.hotkey ?? (isMac ? "Cmd+Shift+V" : "Ctrl+Shift+V"),
   );
   const [hideOnBlur, setHideOnBlur] = useState(getHideOnBlur);
   const [currentTheme, setCurrentTheme] = useState<Theme>(getTheme);
@@ -135,7 +135,7 @@ export function SettingsPanel() {
               />
             }
             title="全局唤出快捷键"
-            description={isMac ? "例如：CmdOrCtrl+Shift+V（Mac 显示为 ⌘⇧V）" : "例如：CmdOrCtrl+Shift+V（Windows 显示为 Ctrl+Shift+V）"}
+            description={isMac ? "例如：Cmd+Shift+V" : "例如：Ctrl+Shift+V"}
           />
         </List.Item>
 
