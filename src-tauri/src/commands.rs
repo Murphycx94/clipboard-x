@@ -1,7 +1,8 @@
-use tauri::State;
-use crate::database::{Database, ClipboardItem, DateGroup, AppSettings};
+use crate::database::{AppSettings, ClipboardItem, Database, DateGroup};
+use crate::{logger, telegram};
 use arboard::Clipboard;
 use std::sync::Arc;
+use tauri::State;
 
 type DbState<'a> = State<'a, Arc<Database>>;
 
@@ -21,8 +22,23 @@ pub fn get_favorite_items(db: DbState) -> Result<Vec<ClipboardItem>, String> {
 }
 
 #[tauri::command]
-pub fn toggle_favorite(id: i64, note: String, db: DbState) -> Result<(), String> {
-    db.toggle_favorite(id, &note).map_err(|e| e.to_string())
+pub async fn toggle_favorite(id: i64, note: String, db: DbState<'_>) -> Result<(), String> {
+    let db = Arc::clone(&*db);
+    let is_now_favorite = db.toggle_favorite(id, &note).map_err(|e| e.to_string())?;
+
+    let (token, chat_id) = db.get_telegram_config().unwrap_or_default();
+    if !token.is_empty() && !chat_id.is_empty() {
+        let items = db.get_favorite_items().unwrap_or_default();
+        let db_clone = Arc::clone(&db);
+        tokio::spawn(async move {
+            match telegram::sync_favorites(&token, &chat_id, &items, db_clone).await {
+                Ok(_) => log::info!("Telegram sync success ({} favorites)", items.len()),
+                Err(e) => log::error!("Telegram sync failed: {}", e),
+            }
+        });
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -48,8 +64,26 @@ pub fn copy_to_clipboard(id: i64, db: DbState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn delete_item(id: i64, db: DbState) -> Result<(), String> {
-    db.delete_item(id).map_err(|e| e.to_string())
+pub async fn delete_item(id: i64, db: DbState<'_>) -> Result<(), String> {
+    let db = Arc::clone(&*db);
+    let was_favorite = db.is_favorite(id).unwrap_or(false);
+    db.delete_item(id).map_err(|e| e.to_string())?;
+
+    if was_favorite {
+        let (token, chat_id) = db.get_telegram_config().unwrap_or_default();
+        if !token.is_empty() && !chat_id.is_empty() {
+            let items = db.get_favorite_items().unwrap_or_default();
+            let db_clone = Arc::clone(&db);
+            tokio::spawn(async move {
+                match telegram::sync_favorites(&token, &chat_id, &items, db_clone).await {
+                    Ok(_) => log::info!("Telegram sync success ({} favorites)", items.len()),
+                    Err(e) => log::error!("Telegram sync failed: {}", e),
+                }
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -80,4 +114,20 @@ pub fn update_retention(days: i64, db: DbState) -> Result<(), String> {
 #[tauri::command]
 pub fn clear_history(db: DbState) -> Result<usize, String> {
     db.clear_history().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_telegram_token(token: String, db: DbState) -> Result<(), String> {
+    db.update_telegram_token(&token).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_telegram_chat_id(chat_id: String, db: DbState) -> Result<(), String> {
+    db.update_telegram_chat_id(&chat_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_logs() -> String {
+    logger::get_log_contents()
 }

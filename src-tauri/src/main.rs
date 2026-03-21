@@ -3,6 +3,8 @@
 mod database;
 mod clipboard;
 mod commands;
+mod telegram;
+mod logger;
 
 use database::Database;
 use clipboard::start_clipboard_monitor;
@@ -130,6 +132,9 @@ fn main() {
             let db_path = app_data_dir.join("clipboardx.db");
             let db = Arc::new(Database::new(db_path.to_str().unwrap())?);
 
+            // Init logger
+            logger::init(&app_data_dir);
+
             // Cleanup expired items on startup
             if let Ok(s) = db.get_settings() {
                 let _ = db.cleanup_expired(s.retention_days);
@@ -212,6 +217,9 @@ fn main() {
             update_retention,
             clear_history,
             hide_window,
+            update_telegram_token,
+            update_telegram_chat_id,
+            get_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

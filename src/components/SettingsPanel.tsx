@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Input,
@@ -15,12 +15,17 @@ import {
   IconCommand,
   IconClockCircle,
   IconDelete,
+  IconMessage,
+  IconFile,
 } from "@arco-design/web-react/icon";
 import {
   getSettings,
   updateHotkey,
   updateRetention,
   clearHistory,
+  updateTelegramToken,
+  updateTelegramChatId,
+  getLogs,
 } from "../api/commands";
 import { type Theme, getTheme, setTheme } from "../hooks/useTheme";
 import { isMac } from "../utils/platform";
@@ -31,12 +36,164 @@ export function getHideOnBlur(): boolean {
   return localStorage.getItem(HIDE_ON_BLUR_KEY) !== "false";
 }
 
+function maskToken(token: string): string {
+  if (!token) return "";
+  if (token.length <= 8) return "****";
+  return token.slice(0, 4) + "****" + token.slice(-4);
+}
+
 const RETENTION_OPTIONS = [
   { label: "一周", value: 7 },
   { label: "一个月", value: 30 },
   { label: "一年", value: 365 },
   { label: "永久保留", value: 0 },
 ];
+
+function TelegramModal({
+  visible,
+  onClose,
+  initialTokenMasked,
+  initialChatId,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  initialTokenMasked: string;
+  initialChatId: string;
+}) {
+  const [tokenDisplay, setTokenDisplay] = useState(initialTokenMasked);
+  const [tokenFocused, setTokenFocused] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState("");
+  const [chatId, setChatId] = useState(initialChatId);
+  const [chatIdSaved, setChatIdSaved] = useState(initialChatId);
+  const [logVisible, setLogVisible] = useState(false);
+  const [logContent, setLogContent] = useState("");
+
+  useEffect(() => {
+    setTokenDisplay(initialTokenMasked);
+    setChatId(initialChatId);
+    setChatIdSaved(initialChatId);
+  }, [initialTokenMasked, initialChatId]);
+
+  const handleTokenFocus = () => {
+    setTokenFocused(true);
+    setTokenDraft("");
+  };
+
+  const handleTokenBlur = async () => {
+    setTokenFocused(false);
+    if (tokenDraft && tokenDraft.length > 8) {
+      await updateTelegramToken(tokenDraft);
+      setTokenDisplay(maskToken(tokenDraft));
+      Message.success("Token 已保存");
+    }
+    setTokenDraft("");
+  };
+
+  const handleChatIdSave = async () => {
+    if (!chatId || chatId === chatIdSaved) return;
+    await updateTelegramChatId(chatId);
+    setChatIdSaved(chatId);
+    Message.success("Chat ID 已保存");
+  };
+
+  const handleViewLogs = async () => {
+    const content = await getLogs();
+    setLogContent(content);
+    setLogVisible(true);
+  };
+
+  const isConfigured = !!(tokenDisplay && chatIdSaved);
+
+  return (
+    <>
+      <Modal
+        title="配置 Telegram Bot"
+        visible={visible}
+        onCancel={onClose}
+        footer={null}
+        style={{ width: 360 }}
+        autoFocus={false}
+      >
+        <div className="flex flex-col gap-4 py-1">
+          {/* Status */}
+          <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500">
+            <span
+              className={`inline-block w-1.5 h-1.5 rounded-full ${isConfigured ? "bg-green-400" : "bg-gray-300 dark:bg-gray-600"}`}
+            />
+            {isConfigured ? "已配置，新增收藏时自动同步" : "未配置，填写下方信息后生效"}
+          </div>
+
+          {/* Token */}
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-gray-500 dark:text-gray-400">Bot Token</span>
+            <Input
+              value={tokenFocused ? tokenDraft : tokenDisplay}
+              onChange={setTokenDraft}
+              onFocus={handleTokenFocus}
+              onBlur={handleTokenBlur}
+              placeholder="输入 Bot Token，失焦后自动保存"
+              type={tokenFocused ? "text" : "password"}
+            />
+          </div>
+
+          {/* Chat ID */}
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              Chat ID
+              <a
+                className="ml-1 text-indigo-400 hover:text-indigo-500"
+                href="https://t.me/userinfobot"
+                target="_blank"
+                rel="noreferrer"
+              >
+                （@userinfobot 获取）
+              </a>
+            </span>
+            <div className="flex gap-2">
+              <Input
+                value={chatId}
+                onChange={setChatId}
+                placeholder="输入 Chat ID"
+                className="flex-1"
+              />
+              <Button type="primary" onClick={handleChatIdSave}>
+                保存
+              </Button>
+            </div>
+          </div>
+
+          {/* Logs */}
+          <div className="flex justify-end pt-1 border-t border-gray-100 dark:border-gray-700">
+            <Button
+              type="text"
+              size="small"
+              icon={<IconFile style={{ fontSize: 13 }} />}
+              onClick={handleViewLogs}
+              style={{ color: "rgb(156 163 175)" }}
+            >
+              查看同步日志
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title="同步日志"
+        visible={logVisible}
+        onCancel={() => setLogVisible(false)}
+        footer={null}
+        style={{ width: 360 }}
+      >
+        <pre
+          className="overflow-auto p-3 text-xs text-gray-700 bg-gray-50 rounded dark:text-gray-300 dark:bg-gray-800"
+          style={{ maxHeight: 400, whiteSpace: "pre-wrap", wordBreak: "break-all" }}
+        >
+          {logContent || "暂无日志"}
+        </pre>
+      </Modal>
+    </>
+  );
+}
 
 export function SettingsPanel() {
   const queryClient = useQueryClient();
@@ -51,6 +208,7 @@ export function SettingsPanel() {
   );
   const [hideOnBlur, setHideOnBlur] = useState(getHideOnBlur);
   const [currentTheme, setCurrentTheme] = useState<Theme>(getTheme);
+  const [telegramModalVisible, setTelegramModalVisible] = useState(false);
 
   const hotKeyMutation = useMutation({
     mutationFn: updateHotkey,
@@ -95,11 +253,12 @@ export function SettingsPanel() {
   };
 
   const currentRetention = settings?.retention_days ?? 7;
+  const isConfigured = !!(settings?.telegram_token_masked && settings?.telegram_chat_id);
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="overflow-y-auto flex-1">
       <div className="px-4 pt-2">
-        <span className="font-medium text-gray-400 uppercase tracking-wider">
+        <span className="font-medium tracking-wider text-gray-400 uppercase">
           设置
         </span>
       </div>
@@ -129,11 +288,7 @@ export function SettingsPanel() {
           }
         >
           <List.Item.Meta
-            avatar={
-              <IconCommand
-                style={{ fontSize: 16, color: "rgb(107 114 128)" }}
-              />
-            }
+            avatar={<IconCommand style={{ fontSize: 16, color: "rgb(107 114 128)" }} />}
             title="全局唤出快捷键"
             description={isMac ? "例如：Cmd+Shift+V" : "例如：Ctrl+Shift+V"}
           />
@@ -141,19 +296,11 @@ export function SettingsPanel() {
 
         <List.Item
           extra={
-            <Switch
-              checked={hideOnBlur}
-              onChange={handleHideOnBlurChange}
-              size="small"
-            />
+            <Switch checked={hideOnBlur} onChange={handleHideOnBlurChange} size="small" />
           }
         >
           <List.Item.Meta
-            avatar={
-              <IconSettings
-                style={{ fontSize: 16, color: "rgb(107 114 128)" }}
-              />
-            }
+            avatar={<IconSettings style={{ fontSize: 16, color: "rgb(107 114 128)" }} />}
             title="失焦自动隐藏"
             description="切换到其他应用时自动收起窗口"
           />
@@ -161,12 +308,7 @@ export function SettingsPanel() {
 
         <List.Item
           extra={
-            <Radio.Group
-              type="button"
-              size="small"
-              value={currentTheme}
-              onChange={handleThemeChange}
-            >
+            <Radio.Group type="button" size="small" value={currentTheme} onChange={handleThemeChange}>
               <Radio value="light">浅色</Radio>
               <Radio value="dark">深色</Radio>
               <Radio value="system">跟随系统</Radio>
@@ -174,11 +316,7 @@ export function SettingsPanel() {
           }
         >
           <List.Item.Meta
-            avatar={
-              <IconSettings
-                style={{ fontSize: 16, color: "rgb(107 114 128)" }}
-              />
-            }
+            avatar={<IconSettings style={{ fontSize: 16, color: "rgb(107 114 128)" }} />}
             title="外观主题"
             description="选择界面显示模式"
           />
@@ -196,13 +334,23 @@ export function SettingsPanel() {
           }
         >
           <List.Item.Meta
-            avatar={
-              <IconClockCircle
-                style={{ fontSize: 16, color: "rgb(107 114 128)" }}
-              />
-            }
+            avatar={<IconClockCircle style={{ fontSize: 16, color: "rgb(107 114 128)" }} />}
             title="历史保留时间"
             description="非收藏内容的自动清理周期"
+          />
+        </List.Item>
+
+        <List.Item
+          extra={
+            <Button size="small" onClick={() => setTelegramModalVisible(true)}>
+              {isConfigured ? "已配置" : "设置"}
+            </Button>
+          }
+        >
+          <List.Item.Meta
+            avatar={<IconMessage style={{ fontSize: 16, color: "rgb(107 114 128)" }} />}
+            title="配置 Telegram Bot"
+            description="用于同步收藏夹内容"
           />
         </List.Item>
 
@@ -220,14 +368,19 @@ export function SettingsPanel() {
           }
         >
           <List.Item.Meta
-            avatar={
-              <IconDelete style={{ fontSize: 16, color: "rgb(107 114 128)" }} />
-            }
+            avatar={<IconDelete style={{ fontSize: 16, color: "rgb(107 114 128)" }} />}
             title="清除历史缓存"
             description="清除所有未收藏的历史记录"
           />
         </List.Item>
       </List>
+
+      <TelegramModal
+        visible={telegramModalVisible}
+        onClose={() => setTelegramModalVisible(false)}
+        initialTokenMasked={settings?.telegram_token_masked ?? ""}
+        initialChatId={settings?.telegram_chat_id ?? ""}
+      />
     </div>
   );
 }

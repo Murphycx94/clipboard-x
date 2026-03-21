@@ -68,7 +68,8 @@ fn encode_png(img: &RgbaImage) -> Vec<u8> {
         img.height(),
         image::ExtendedColorType::Rgba8,
     );
-    buf
+    // 无损压缩
+    oxipng::optimize_from_memory(&buf, &oxipng::Options::default()).unwrap_or(buf)
 }
 
 fn make_thumbnail(img: &RgbaImage, w: u32, h: u32) -> Vec<u8> {
@@ -81,5 +82,5 @@ fn make_thumbnail(img: &RgbaImage, w: u32, h: u32) -> Vec<u8> {
         thumb.height(),
         image::ExtendedColorType::Rgba8,
     );
-    buf
+    oxipng::optimize_from_memory(&buf, &oxipng::Options::default()).unwrap_or(buf)
 }
