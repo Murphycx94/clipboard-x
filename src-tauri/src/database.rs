@@ -1,8 +1,8 @@
-use rusqlite::{Connection, Result, params};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Local;
+use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClipboardItem {
@@ -25,6 +25,8 @@ pub struct DateGroup {
 pub struct AppSettings {
     pub hotkey: String,
     pub retention_days: i64, // 0 = 永久保留
+    pub telegram_token_masked: String,
+    pub telegram_chat_id: String,
 }
 
 pub struct Database(pub Mutex<Connection>);
@@ -52,7 +54,9 @@ impl Database {
                 value TEXT NOT NULL
             );
             INSERT OR IGNORE INTO settings(key, value) VALUES ('hotkey', 'CmdOrCtrl+Shift+V');
-            INSERT OR IGNORE INTO settings(key, value) VALUES ('retention_days', '7');",
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('retention_days', '7');
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('telegram_token', '');
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('telegram_chat_id', '');",
         )?;
         Ok(Database(Mutex::new(conn)))
     }
@@ -104,7 +108,8 @@ impl Database {
              WHERE date(created_at) = ?1
              ORDER BY created_at DESC",
         )?;
-        let result = stmt.query_map(params![today], Self::row_to_item)?
+        let result = stmt
+            .query_map(params![today], Self::row_to_item)?
             .collect::<Result<Vec<_>>>();
         result
     }
@@ -118,7 +123,8 @@ impl Database {
              WHERE date(created_at) < ?1
              ORDER BY created_at DESC",
         )?;
-        let items = stmt.query_map(params![today], Self::row_to_item)?
+        let items = stmt
+            .query_map(params![today], Self::row_to_item)?
             .collect::<Result<Vec<_>>>()?;
 
         let mut groups: Vec<DateGroup> = Vec::new();
@@ -127,7 +133,10 @@ impl Database {
             if let Some(g) = groups.iter_mut().find(|g| g.date == date) {
                 g.items.push(item);
             } else {
-                groups.push(DateGroup { date, items: vec![item] });
+                groups.push(DateGroup {
+                    date,
+                    items: vec![item],
+                });
             }
         }
         Ok(groups)
@@ -141,12 +150,13 @@ impl Database {
              WHERE is_favorite = 1
              ORDER BY created_at DESC",
         )?;
-        let result = stmt.query_map([], Self::row_to_item)?
+        let result = stmt
+            .query_map([], Self::row_to_item)?
             .collect::<Result<Vec<_>>>();
         result
     }
 
-    pub fn toggle_favorite(&self, id: i64, note: &str) -> Result<()> {
+    pub fn toggle_favorite(&self, id: i64, note: &str) -> Result<bool> {
         let conn = self.0.lock().unwrap();
         conn.execute(
             "UPDATE clipboard_items
@@ -154,7 +164,12 @@ impl Database {
              WHERE id=?1",
             params![id, note],
         )?;
-        Ok(())
+        let is_fav: i64 = conn.query_row(
+            "SELECT is_favorite FROM clipboard_items WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(is_fav != 0)
     }
 
     pub fn get_image_data(&self, id: i64) -> Result<Option<Vec<u8>>> {
@@ -166,10 +181,13 @@ impl Database {
     pub fn get_image_base64(&self, id: i64) -> Result<Option<String>> {
         let conn = self.0.lock().unwrap();
         let mut stmt = conn.prepare("SELECT image_data FROM clipboard_items WHERE id=?1")?;
-        Ok(stmt.query_row(params![id], |row| {
-            let bytes: Option<Vec<u8>> = row.get(0)?;
-            Ok(bytes.map(|b| BASE64.encode(b)))
-        }).ok().flatten())
+        Ok(stmt
+            .query_row(params![id], |row| {
+                let bytes: Option<Vec<u8>> = row.get(0)?;
+                Ok(bytes.map(|b| BASE64.encode(b)))
+            })
+            .ok()
+            .flatten())
     }
 
     pub fn get_text_content(&self, id: i64) -> Result<Option<String>> {
@@ -184,6 +202,16 @@ impl Database {
         stmt.query_row(params![id], |row| row.get(0))
     }
 
+    pub fn is_favorite(&self, id: i64) -> Result<bool> {
+        let conn = self.0.lock().unwrap();
+        let val: i64 = conn.query_row(
+            "SELECT is_favorite FROM clipboard_items WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )?;
+        Ok(val != 0)
+    }
+
     pub fn delete_item(&self, id: i64) -> Result<()> {
         let conn = self.0.lock().unwrap();
         conn.execute("DELETE FROM clipboard_items WHERE id=?1", params![id])?;
@@ -192,11 +220,10 @@ impl Database {
 
     pub fn get_settings(&self) -> Result<AppSettings> {
         let conn = self.0.lock().unwrap();
-        let hotkey: String = conn.query_row(
-            "SELECT value FROM settings WHERE key='hotkey'",
-            [],
-            |row| row.get(0),
-        )?;
+        let hotkey: String =
+            conn.query_row("SELECT value FROM settings WHERE key='hotkey'", [], |row| {
+                row.get(0)
+            })?;
         let retention_days: i64 = conn
             .query_row(
                 "SELECT value FROM settings WHERE key='retention_days'",
@@ -205,7 +232,63 @@ impl Database {
             )
             .map(|v| v.parse().unwrap_or(0))
             .unwrap_or(0);
-        Ok(AppSettings { hotkey, retention_days })
+        let telegram_token: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='telegram_token'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let telegram_chat_id: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='telegram_chat_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        Ok(AppSettings {
+            hotkey,
+            retention_days,
+            telegram_token_masked: mask_token(&telegram_token),
+            telegram_chat_id,
+        })
+    }
+
+    pub fn get_telegram_config(&self) -> Result<(String, String)> {
+        let conn = self.0.lock().unwrap();
+        let token: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='telegram_token'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let chat_id: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='telegram_chat_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        Ok((token, chat_id))
+    }
+
+    pub fn update_telegram_token(&self, token: &str) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('telegram_token', ?1)",
+            params![token],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_telegram_chat_id(&self, chat_id: &str) -> Result<()> {
+        let conn = self.0.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES ('telegram_chat_id', ?1)",
+            params![chat_id],
+        )?;
+        Ok(())
     }
 
     pub fn update_retention(&self, days: i64) -> Result<()> {
@@ -219,15 +302,14 @@ impl Database {
 
     pub fn clear_history(&self) -> Result<usize> {
         let conn = self.0.lock().unwrap();
-        let count = conn.execute(
-            "DELETE FROM clipboard_items WHERE is_favorite = 0",
-            [],
-        )?;
+        let count = conn.execute("DELETE FROM clipboard_items WHERE is_favorite = 0", [])?;
         Ok(count)
     }
 
     pub fn cleanup_expired(&self, retention_days: i64) -> Result<()> {
-        if retention_days == 0 { return Ok(()); }
+        if retention_days == 0 {
+            return Ok(());
+        }
         let conn = self.0.lock().unwrap();
         conn.execute(
             "DELETE FROM clipboard_items WHERE is_favorite = 0
@@ -254,4 +336,17 @@ impl Database {
         )?;
         Ok(())
     }
+}
+
+fn mask_token(token: &str) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() <= 8 {
+        return "****".to_string();
+    }
+    let prefix: String = chars[..4].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    format!("{}****{}", prefix, suffix)
 }

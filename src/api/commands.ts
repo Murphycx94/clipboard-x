@@ -39,3 +39,12 @@ export const clearHistory = (): Promise<number> =>
 
 export const hideWindow = (): Promise<void> =>
   invoke("hide_window");
+
+export const updateTelegramToken = (token: string): Promise<void> =>
+  invoke("update_telegram_token", { token });
+
+export const updateTelegramChatId = (chatId: string): Promise<void> =>
+  invoke("update_telegram_chat_id", { chatId });
+
+export const getLogs = (): Promise<string> =>
+  invoke("get_logs");
