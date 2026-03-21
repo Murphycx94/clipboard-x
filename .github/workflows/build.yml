@@ -17,15 +17,9 @@ permissions:
   contents: write
 
 jobs:
-  approve:
-    runs-on: ubuntu-latest
-    environment: release
-    steps:
-      - run: echo "Approved for release v${{ inputs.version }}"
-
   build-macos:
-    needs: approve
     runs-on: macos-latest
+    environment: release
     steps:
       - uses: actions/checkout@v4
 
@@ -50,8 +44,8 @@ jobs:
           path: src-tauri/target/release/bundle/dmg/*.dmg
 
   build-windows:
-    needs: approve
     runs-on: windows-latest
+    environment: release
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +74,8 @@ jobs:
   release:
     needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
+    if: always() && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success')
+    environment: release
     steps:
       - uses: actions/checkout@v4
 
