@@ -16,6 +16,7 @@ pub mod services;
 pub mod telegram;
 mod ui;
 pub mod updater;
+pub mod vault;
 
 use nsh_core::element::Root;
 use nsh_core::prelude::*;

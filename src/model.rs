@@ -105,6 +105,14 @@ impl ThemePreference {
 pub const RETENTION_OPTIONS: [(i64, &str); 4] =
     [(7, "一周"), (30, "一个月"), (365, "一年"), (0, "永久")];
 
+/// Idle minutes before the vault locks: (minutes, label).
+pub const VAULT_LOCK_OPTIONS: [(i64, &str); 4] = [
+    (1, "1 分钟"),
+    (5, "5 分钟"),
+    (15, "15 分钟"),
+    (30, "30 分钟"),
+];
+
 /// The default global shortcut.
 pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Shift+V";
 
@@ -118,6 +126,12 @@ pub struct Settings {
     pub telegram_chat_id: String,
     pub theme: ThemePreference,
     pub hide_on_blur: bool,
+    /// Idle minutes before the vault locks.
+    pub vault_lock_minutes: i64,
+    /// Lock the vault when the panel hides.
+    pub vault_lock_on_hide: bool,
+    /// Unlock the vault with Touch ID.
+    pub vault_touch_id: bool,
 }
 
 impl Default for Settings {
@@ -129,6 +143,9 @@ impl Default for Settings {
             telegram_chat_id: String::new(),
             theme: ThemePreference::System,
             hide_on_blur: true,
+            vault_lock_minutes: 5,
+            vault_lock_on_hide: true,
+            vault_touch_id: false,
         }
     }
 }
@@ -150,6 +167,9 @@ impl fmt::Debug for Settings {
             .field("telegram_chat_id", &self.telegram_chat_id)
             .field("theme", &self.theme)
             .field("hide_on_blur", &self.hide_on_blur)
+            .field("vault_lock_minutes", &self.vault_lock_minutes)
+            .field("vault_lock_on_hide", &self.vault_lock_on_hide)
+            .field("vault_touch_id", &self.vault_touch_id)
             .finish()
     }
 }
