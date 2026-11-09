@@ -1,0 +1,138 @@
+name: CI
+
+# Every push and pull request: format, lint and test, then package a
+# universal macOS app (a workflow artifact). Pushes to main whose version
+# (Cargo.toml) has no tag yet also publish a GitHub release v<version>,
+# which the app's update check finds.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Never cancel a run on main: it may be publishing a release.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --all-targets -- -D warnings
+
+      # Includes the headless UI tests; they keep off the clipboard and the
+      # keychain by themselves.
+      - run: cargo test
+
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      should_release: ${{ steps.read.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the version and look for its tag
+        id: read
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          nsh_version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' nsh.json | head -1)
+          if [ -z "$version" ]; then
+            echo "::error::no version in Cargo.toml"
+            exit 1
+          fi
+          if [ "$version" != "$nsh_version" ]; then
+            echo "::error::Cargo.toml ($version) and nsh.json ($nsh_version) versions differ"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --tags origin "refs/tags/v$version" | grep -q .; then
+            echo "v$version is already released"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "will release v$version"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  package:
+    name: package macOS
+    needs: [check, version]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: universal
+
+      - name: Build the universal app and disk image
+        run: scripts/bundle-macos.sh --universal --dmg
+
+      - name: Zip the app
+        run: |
+          ditto -c -k --keepParent dist/ClipboardX.app \
+            "dist/ClipboardX-${{ needs.version.outputs.version }}-macos-universal.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipboardX-${{ needs.version.outputs.version }}-macos
+          path: |
+            dist/ClipboardX-*.dmg
+            dist/ClipboardX-*-macos-universal.zip
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: [version, package]
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ClipboardX-${{ needs.version.outputs.version }}-macos
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            macOS 14 及以上，Apple 芯片与 Intel 通用。
+
+            应用未经 Apple 公证（ad-hoc 签名），首次打开时系统可能提示"无法验证开发者"或"已损坏"：
+            在"访达"中按住 Control 点按应用并选择"打开"，或在终端运行
+            `xattr -dr com.apple.quarantine /Applications/ClipboardX.app`。
+          files: |
+            artifacts/ClipboardX-*.dmg
+            artifacts/ClipboardX-*-macos-universal.zip

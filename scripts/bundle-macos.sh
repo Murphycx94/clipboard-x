@@ -2,16 +2,21 @@
 # Builds dist/ClipboardX.app (menu-bar app, no Dock icon) and, with --dmg,
 # dist/ClipboardX-<version>.dmg. Signs ad hoc unless SIGN_IDENTITY is set.
 #
-#   scripts/bundle-macos.sh [--dmg] [--target aarch64-apple-darwin|x86_64-apple-darwin]
+#   scripts/bundle-macos.sh [--dmg] [--universal | --target aarch64-apple-darwin|x86_64-apple-darwin]
+#
+# --universal builds for Apple silicon and Intel and joins them with lipo
+# (needs both rustup targets).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 make_dmg=false
+universal=false
 target=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dmg) make_dmg=true; shift ;;
+    --universal) universal=true; shift ;;
     --target) target="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -20,12 +25,25 @@ done
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 identity="${SIGN_IDENTITY:--}"
 
-if [[ -n "$target" ]]; then
+# Where cargo puts builds (CARGO_TARGET_DIR and config included).
+target_dir=$(cargo metadata --format-version 1 --no-deps |
+  sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+
+if $universal; then
+  for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo build --release --target "$arch"
+  done
+  mkdir -p "$target_dir/universal"
+  binary="$target_dir/universal/clipboardx"
+  lipo -create -output "$binary" \
+    "$target_dir/aarch64-apple-darwin/release/clipboardx" \
+    "$target_dir/x86_64-apple-darwin/release/clipboardx"
+elif [[ -n "$target" ]]; then
   cargo build --release --target "$target"
-  binary="target/$target/release/clipboardx"
+  binary="$target_dir/$target/release/clipboardx"
 else
   cargo build --release
-  binary="target/release/clipboardx"
+  binary="$target_dir/release/clipboardx"
 fi
 
 app="dist/ClipboardX.app"

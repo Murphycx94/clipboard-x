@@ -84,8 +84,17 @@ nsh check
 ```sh
 scripts/bundle-macos.sh                 # dist/ClipboardX.app（仅菜单栏，无 Dock 图标），ad-hoc 签名
 scripts/bundle-macos.sh --dmg           # 另外生成 dist/ClipboardX-<版本>.dmg
+scripts/bundle-macos.sh --universal --dmg   # Apple 芯片 + Intel 通用版（需 rustup target add x86_64-apple-darwin）
 SIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh --dmg
 ```
+
+### GitHub Actions
+
+`.github/workflows/ci.yml`：
+
+- **每次推送和 PR**：在 macOS 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test`（含无头 UI 测试），然后打包通用版 `.dmg` 和 `.app` 压缩包，作为工作流产物（Actions 页面的 Artifacts）供下载。
+- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，就自动打标签并发布 GitHub Release，附带 `.dmg` 和 `.zip`。应用内的"检查更新"读取的就是这里的最新版本。
+- **发新版本的步骤**：同时修改 `Cargo.toml` 和 `nsh.json` 的 `version`（两处不一致时 CI 会失败），然后合并到 `main`。
 
 `nsh package --target macos` 也能打包，但它使用 NSH 生成的通用运行器，没有菜单栏图标、全局快捷键和浮动面板，只适合预览界面。
 
