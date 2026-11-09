@@ -1,80 +1,72 @@
 # ClipboardX
 
-一款跨平台（macOS / Windows）桌面级剪贴板历史管理工具，支持文本与图片的历史记录、快捷键唤出、收藏备注等功能。
+一款桌面剪贴板历史管理工具：自动记录复制过的文本与图片，用全局快捷键随时唤出，支持收藏、备注、历史归档与 Telegram 同步。
+
+本分支（`feat/nsh`）用 [Native Shell (NSH)](https://nsh.dev) 以纯 Rust 重写了原 Tauri + React 版本（见 `main` 分支）：界面是 NSH 组件（macOS 上由 AppKit 原生绘制），不再有 WebView、Node 与前端构建链。
 
 ---
 
-## 功能需求
+## 功能
 
-1. **全量历史记录** — 自动捕获所有复制内容，包括文本与图片
-2. **快捷键唤出** — 可自定义全局快捷键，唤出当日历史面板，内容按时间倒序排列
-3. **历史归档** — 非当日内容按日期分组收纳，支持浏览与管理
-4. **收藏 & 备注** — 可将任意历史条目加入收藏并添加备注，收藏内容在独立 Tab 中展示
-5. **快捷复制** — 所有历史条目均可一键复制回剪贴板
+1. **全量历史记录**：每 500ms 读取一次剪贴板，记录文本与图片；内容按哈希去重，重复复制的条目移到最前
+2. **快捷键唤出**：默认 `Cmd+Shift+V`（Windows/Linux 为 `Ctrl+Shift+V`），可在设置中修改，保存后立即生效
+3. **今日历史 / 收藏夹**：内容按时间倒序排列，支持搜索（文本与备注）和"只看图片"
+4. **历史归档**：非当日内容按日期分组折叠，点击展开
+5. **收藏与备注**：悬停条目可添加备注、收藏、删除；点击图片缩略图查看大图
+6. **快捷复制**：点击条目复制回剪贴板；`Enter` 或 `⌘⇧1`–`⌘⇧9` 复制并收起窗口
+7. **设置**：失焦自动隐藏、外观主题（浅色/深色/跟随系统）、历史保留时间（一周/一个月/一年/永久）、清除历史、检查更新
+8. **Telegram 同步**：配置 Bot Token 与 Chat ID 后，收藏变化时把收藏列表推送到 Telegram
+
+### 键盘
+
+| 按键 | 作用 |
+|---|---|
+| `Esc` | 关闭弹窗；没有弹窗时收起窗口 |
+| `Tab`，或 `←` / `→`（搜索框为空时） | 切换今日历史 / 收藏夹 |
+| `↑` / `↓` | 移动选中项 |
+| `Enter` | 复制选中项并收起窗口 |
+| `⌘⇧1`–`⌘⇧9`（Windows/Linux：`Ctrl+Shift+1`–`9`） | 复制第 N 条并收起窗口 |
+
+窗口唤出时焦点在搜索框，直接输入即可过滤。
 
 ---
 
-## 技术栈
+## 开发
 
-### 整体架构
+需要 [Rust](https://rustup.rs)（edition 2024）。如需使用 `nsh` 命令，可通过 `brew install longbridge/tap/nsh` 安装。
 
+```sh
+cargo run                      # 完整桌面应用：菜单栏图标 + 全局快捷键 + 浮动面板
+CLIPBOARDX_SHOW=1 cargo run    # 启动时直接显示面板
+cargo test                     # 单元测试 + 无头 UI 测试（tests/ui.rs）
+nsh run                        # NSH 开发运行器：普通窗口，无菜单栏图标与全局快捷键
+nsh check
 ```
-ClipboardX
-├── 后端：Rust（via Tauri）
-└── 前端：React + TypeScript
+
+环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `CLIPBOARDX_DATA_DIR` | 数据目录（数据库与日志），默认为系统应用数据目录下的 `com.clipboardx.app` |
+| `CLIPBOARDX_NO_CAPTURE` | 设置后不读取剪贴板（测试用） |
+| `CLIPBOARDX_SHOW` | 设置后启动时显示面板 |
+
+数据库仍是 `~/Library/Application Support/com.clipboardx.app/clipboardx.db`，表结构与 Tauri 版相同，旧版的历史、收藏和设置会直接沿用。
+
+## 打包（macOS）
+
+```sh
+scripts/bundle-macos.sh                 # dist/ClipboardX.app（仅菜单栏，无 Dock 图标），ad-hoc 签名
+scripts/bundle-macos.sh --dmg           # 另外生成 dist/ClipboardX-<版本>.dmg
+SIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh --dmg
 ```
 
-选择 **Tauri** 而非 Electron 的原因：
+`nsh package --target macos` 也能打包，但它使用 NSH 生成的通用运行器，没有菜单栏图标、全局快捷键和浮动面板，只适合预览界面。
 
-| 对比项     | Tauri          | Electron        |
-|------------|----------------|-----------------|
-| 包体大小   | ~3–10 MB       | ~80–150 MB      |
-| 内存占用   | 低（Rust 后端）| 高（Node + Chromium）|
-| 系统集成   | 优秀           | 良好            |
-| 跨平台支持 | Mac / Win / Linux | Mac / Win / Linux |
+## 平台支持
 
-### 依赖库
-
-#### Rust 后端
-
-| 库 | 用途 |
-|----|------|
-| `tauri` | 桌面应用框架，系统托盘、窗口管理 |
-| `arboard` | 剪贴板读写（文本 + 图片） |
-| `rusqlite` | 本地 SQLite 数据库 |
-| `global-hotkey` | 注册全局快捷键 |
-| `image` | 图片编码 / 解码处理 |
-| `serde` / `serde_json` | 数据序列化，前后端通信 |
-
-#### React 前端
-
-| 库 | 用途 |
-|----|------|
-| `react` + `typescript` | UI 框架 |
-| `tailwindcss` | 样式 |
-| `zustand` | 全局状态管理 |
-| `@tanstack/react-query` | 异步数据获取与缓存 |
-| `lucide-react` | 图标库 |
-
----
-
-## 数据库设计
-
-使用 SQLite，数据库文件存储于系统应用数据目录（`AppData` / `Application Support`）。
-
-### 表：`clipboard_items`
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | INTEGER PK | 自增主键 |
-| `content_type` | TEXT | `text` 或 `image` |
-| `text_content` | TEXT | 文本内容（可为空） |
-| `image_data` | BLOB | 图片二进制（可为空） |
-| `image_thumbnail` | BLOB | 图片缩略图（用于列表展示） |
-| `created_at` | DATETIME | 复制时间戳 |
-| `is_favorite` | BOOLEAN | 是否收藏 |
-| `note` | TEXT | 收藏备注 |
-| `hash` | TEXT | 内容哈希（用于去重） |
+- **macOS 14+**：完整支持。应用以浮动面板运行：不抢占前台应用的焦点，在鼠标所在屏幕的右侧显示，所有桌面空间可见。
+- **Windows / Linux**：`src/main.rs` 会以 NSH 的普通窗口运行同一套界面和剪贴板记录，但尚未接入托盘图标、全局快捷键和失焦隐藏，也未在这两个平台上编译验证。
 
 ---
 
@@ -82,125 +74,41 @@ ClipboardX
 
 ```
 ClipboardX/
-├── src-tauri/                  # Rust 后端
-│   ├── src/
-│   │   ├── main.rs             # 程序入口，系统托盘，窗口初始化
-│   │   ├── clipboard.rs        # 剪贴板监听与内容捕获
-│   │   ├── database.rs         # SQLite CRUD 操作
-│   │   ├── hotkey.rs           # 全局快捷键注册与管理
-│   │   └── commands.rs         # Tauri IPC 命令（供前端调用）
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-│
-├── src/                        # React 前端
-│   ├── components/
-│   │   ├── ClipboardItem.tsx   # 单条历史记录组件
-│   │   ├── HistoryList.tsx     # 今日历史列表
-│   │   ├── FavoriteList.tsx    # 收藏列表
-│   │   ├── DateGroup.tsx       # 按日期分组的历史归档
-│   │   └── SettingsPanel.tsx   # 快捷键等设置面板
-│   ├── pages/
-│   │   ├── MainPanel.tsx       # 主面板（含 Today / Favorites 两个 Tab）
-│   │   └── ArchivePage.tsx     # 历史归档页面
-│   ├── store/
-│   │   └── useClipboardStore.ts # Zustand 状态管理
-│   ├── hooks/
-│   │   └── useClipboardData.ts # React Query 数据 hooks
-│   └── App.tsx
-│
-├── README.md
-└── package.json
+├── Cargo.toml
+├── nsh.json               # NSH 应用配置：根组件 App、主题、图标
+├── theme.json             # 设计令牌（shadcn cssVars 格式），浅色/深色两套
+├── assets/                # 应用图标
+├── scripts/bundle-macos.sh
+├── src/
+│   ├── lib.rs             # 模块声明、NSH 根组件注册、root()
+│   ├── main.rs            # 桌面入口：初始化日志与剪贴板监听，启动宿主
+│   ├── macos.rs           # macOS 宿主：NSPanel、菜单栏图标、全局快捷键、失焦隐藏
+│   ├── model.rs           # 数据类型与纯函数（过滤、按日分组、掩码、标签）
+│   ├── db.rs              # SQLite 存取（历史与设置）
+│   ├── capture.rs         # 剪贴板轮询、PNG 编码与缩略图、复制回剪贴板
+│   ├── services.rs        # UI 与宿主共享的服务（数据库、变更计数、窗口桥接、同步）
+│   ├── telegram.rs        # 收藏同步到 Telegram
+│   ├── updater.rs         # 通过 GitHub Releases 检查新版本
+│   ├── hotkey.rs          # 快捷键字符串解析与校验
+│   ├── logger.rs          # 日志文件
+│   └── ui/                # NSH 组件
+│       ├── mod.rs         # 根组件 App
+│       ├── state.rs       # 界面状态（signals）与操作
+│       ├── keys.rs        # 键盘快捷键
+│       ├── header.rs  main_panel.rs  item_row.rs  archive.rs  settings.rs  dialogs.rs
+│       └── widgets.rs  icons.rs
+└── tests/ui.rs            # 无头 UI 测试（nsh-testing）
 ```
 
----
+### 线程模型
 
-## UI 交互设计
+- NSH 组件运行在引擎线程；macOS 宿主（AppKit、托盘、快捷键）运行在主线程；剪贴板监听与 Telegram 同步各自运行在独立线程。
+- 它们只通过 `services.rs` 交互：界面每 300ms 读取一次原子计数器（数据是否变化、窗口是否被唤出）；界面通过 `WindowHost` 让宿主隐藏窗口或注册新快捷键，调用会投递到主线程执行。
 
-### 主面板（快捷键唤出）
+## 与 Tauri 版的差异
 
-```
-┌─────────────────────────────────────┐
-│  ClipboardX          [设置] [归档]  │
-├─────────────────────────────────────┤
-│  [ 今日历史 ]  [ 收藏夹 ]           │  ← Tab 切换
-├─────────────────────────────────────┤
-│  🔍 搜索...                         │
-├─────────────────────────────────────┤
-│  14:32  "npm install tailwindcss"   │  ← 最新在上
-│  14:10  [图片] screenshot.png       │
-│  13:45  "Hello, World!"             │
-│  ...                                │
-└─────────────────────────────────────┘
-```
-
-### 收藏夹 Tab
-
-```
-┌─────────────────────────────────────┐
-│  [ 今日历史 ]  [ 收藏夹 ]           │
-├─────────────────────────────────────┤
-│  ★  "API_KEY=xxx..."                │
-│     备注：生产环境密钥               │
-│  ★  [图片] design-mockup.png        │
-│     备注：最终版设计稿               │
-└─────────────────────────────────────┘
-```
-
-### 历史归档页
-
-```
-┌─────────────────────────────────────┐
-│  ← 返回    历史归档                  │
-├─────────────────────────────────────┤
-│  ▼ 2026-03-17（12 条）              │
-│     "git commit -m 'fix bug'"       │
-│     [图片] ...                      │
-│  ▶ 2026-03-16（8 条）               │
-│  ▶ 2026-03-15（20 条）              │
-└─────────────────────────────────────┘
-```
-
----
-
-## 核心功能实现思路
-
-### 剪贴板监听
-在 Rust 后端起一个独立线程，每隔 500ms 轮询剪贴板内容，与上一次内容做哈希对比，变更时写入数据库并去重。
-
-### 全局快捷键
-使用 `global-hotkey` 注册系统级快捷键。用户在设置面板中自定义，快捷键配置持久化存储于 SQLite `settings` 表，应用启动时自动注册。
-
-### 图片处理
-`arboard` 读取图片为 RGBA 原始像素数据，使用 `image` crate 编码为 PNG 存入数据库 BLOB，同时生成 64×64 缩略图用于列表展示，避免加载大图影响性能。
-
-### 前后端通信
-通过 Tauri IPC（`invoke`）调用 Rust 命令，主要接口：
-
-```typescript
-// 获取今日历史
-invoke('get_today_items') => ClipboardItem[]
-
-// 获取历史归档（按日期分组）
-invoke('get_archive_items') => DateGroup[]
-
-// 切换收藏状态
-invoke('toggle_favorite', { id, note }) => void
-
-// 复制条目回剪贴板
-invoke('copy_to_clipboard', { id }) => void
-
-// 更新快捷键设置
-invoke('update_hotkey', { hotkey }) => void
-```
-
----
-
-## 开发路线图
-
-- [ ] **Phase 1** — 项目初始化，Tauri + React 脚手架，SQLite 数据库 schema
-- [ ] **Phase 2** — 剪贴板监听（文本 + 图片），历史写入与去重
-- [ ] **Phase 3** — 主面板 UI，今日历史列表，快捷键唤出
-- [ ] **Phase 4** — 收藏功能，备注编辑，收藏 Tab
-- [ ] **Phase 5** — 历史归档页面，日期分组浏览
-- [ ] **Phase 6** — 设置面板，自定义快捷键，搜索功能
-- [ ] **Phase 7** — 打包发布（macOS `.dmg` / Windows `.msi`）
+- 快捷键修改后立即生效（原为重启后生效），并会校验格式。
+- 搜索同时作用于收藏夹（原仅今日历史），键盘导航也同时支持两个列表。
+- 检查更新改为查询 GitHub Releases，发现新版本后打开下载页（原为 Tauri updater 自动安装）。
+- 历史保留时间改为分段按钮，不再使用下拉框。
+- 时间戳精确到毫秒，保证同一秒内的重复复制也能正确排序；旧数据兼容。

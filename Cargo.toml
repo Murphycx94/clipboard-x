@@ -1,0 +1,54 @@
+[package]
+name = "clipboardx"
+version = "0.2.0"
+description = "ClipboardX - Clipboard History Manager"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clipboardx"
+path = "src/main.rs"
+
+[dependencies]
+nsh-core = "0.4.0"
+nsh-base = "0.4.0"
+log = "0.4.35"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+hex = "0.4.3"
+base64 = "0.23.1"
+simplelog = "0.12.2"
+dirs = "7.0.0"
+semver = "1.0.28"
+serde = { version = "1.0.229", features = ["derive"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+arboard = "3.7.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+oxipng = { version = "10.2.1", default-features = false, features = ["parallel"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+global-hotkey = "0.9.0"
+tray-icon = "0.26.1"
+reqwest = { version = "0.13.5", features = ["blocking", "json", "multipart"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = "0.3.1"
+nsh-platform-macos = { version = "0.4.0", default-features = false }
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { version = "0.4.0", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "0.4.0", default-features = false }
+
+[dev-dependencies]
+nsh-engine = "0.4.0"
+nsh-testing = "0.4.0"
+tempfile = "3.27.0"

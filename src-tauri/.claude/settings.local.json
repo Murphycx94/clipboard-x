@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(cargo tauri:*)",
-      "Bash(npx tauri:*)"
-    ]
-  }
-}
