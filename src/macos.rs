@@ -10,8 +10,10 @@
 
 use std::cell::{Cell, RefCell};
 use std::process::ExitCode;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
+use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -23,9 +25,12 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
     NSFloatingWindowLevel, NSMenu, NSMenuItem, NSPanel, NSScreen, NSView, NSWindowButton,
     NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWorkspace, NSWorkspaceScreensDidSleepNotification,
+    NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
-    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSDistributedNotificationCenter, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString,
 };
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -48,6 +53,8 @@ struct Host {
     tray: RefCell<Option<TrayIcon>>,
     show_item: MenuItem,
     quit_item: MenuItem,
+    /// Sleep and screen-lock observers, which lock the vault.
+    _observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
 }
 
 thread_local! {
@@ -128,6 +135,7 @@ impl Host {
 
     fn hide(&self) {
         self.panel.orderOut(None);
+        services().window_hidden();
     }
 
     fn show(&self) {
@@ -364,6 +372,41 @@ fn listen_to_events() {
     }));
 }
 
+/// Locks the vault when the Mac sleeps, its displays sleep, the user
+/// switches away or the screen locks.
+fn observe_lock_events() -> Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>> {
+    let lock = RcBlock::new(|_: NonNull<NSNotification>| services().lock_vault());
+    let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+    // SAFETY: AppKit's notification name statics, read once.
+    let names = unsafe {
+        [
+            NSWorkspaceWillSleepNotification,
+            NSWorkspaceScreensDidSleepNotification,
+            NSWorkspaceSessionDidResignActiveNotification,
+        ]
+    };
+    let mut observers: Vec<_> = names
+        .into_iter()
+        .map(|name| {
+            // SAFETY: the block is 'static and only locks the vault.
+            unsafe {
+                workspace.addObserverForName_object_queue_usingBlock(Some(name), None, None, &lock)
+            }
+        })
+        .collect();
+    let screen_locked = NSString::from_str("com.apple.screenIsLocked");
+    // SAFETY: as above, on the distributed center the screen lock posts to.
+    observers.push(unsafe {
+        NSDistributedNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(&screen_locked),
+            None,
+            None,
+            &lock,
+        )
+    });
+    observers
+}
+
 /// Runs the app until it quits.
 pub fn run(size: (i32, i32)) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -407,6 +450,7 @@ pub fn run(size: (i32, i32)) -> ExitCode {
             tray: RefCell::new(None),
             show_item,
             quit_item,
+            _observers: observe_lock_events(),
         });
     });
     services().set_host(Box::new(MacHost));

@@ -56,6 +56,7 @@ pub fn header(state: AppState) -> impl IntoElement {
                         Page::Main => "",
                         Page::Archive => "· 历史归档",
                         Page::Settings => "· 设置",
+                        Page::Vault => "· 密码本",
                     })
                     .text_sm()
                     .text_color(muted),
@@ -67,6 +68,12 @@ pub fn header(state: AppState) -> impl IntoElement {
                 .items_center()
                 .gap(px(2.0))
                 .window_drag(false)
+                .child(icon_button(
+                    Icon::Key,
+                    "密码本",
+                    page_tint(Page::Vault),
+                    move || state.toggle_page(Page::Vault),
+                ))
                 .child(icon_button(
                     Icon::Archive,
                     "历史归档",

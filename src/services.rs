@@ -12,6 +12,8 @@ use std::sync::{Arc, OnceLock};
 use crate::capture;
 use crate::db::Database;
 use crate::telegram::{self, TelegramTarget};
+use crate::vault::keychain::{self, KeyStore};
+use crate::vault::{self, KdfParams, VaultService};
 
 /// The app's id: its data directory's name.
 pub const APP_ID: &str = "com.clipboardx.app";
@@ -37,6 +39,7 @@ pub struct Services {
     capture_started: AtomicBool,
     stop_capture: Arc<AtomicBool>,
     host: OnceLock<Box<dyn WindowHost>>,
+    vault: VaultService,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -75,8 +78,21 @@ impl Services {
     }
 
     pub fn new(db: Database, data_dir: PathBuf) -> Services {
+        Services::with_vault(db, data_dir, keychain::platform(), KdfParams::DEFAULT)
+    }
+
+    /// Services whose vault keeps its Touch ID key in `keys` and derives
+    /// keys with `params` (tests use cheap ones).
+    pub fn with_vault(
+        db: Database,
+        data_dir: PathBuf,
+        keys: Box<dyn KeyStore>,
+        params: KdfParams,
+    ) -> Services {
+        let db = Arc::new(db);
         Services {
-            db: Arc::new(db),
+            vault: VaultService::with_params(db.clone(), keys, params),
+            db,
             data_dir,
             data_version: Arc::new(AtomicU64::new(0)),
             shown: AtomicU64::new(0),
@@ -142,6 +158,31 @@ impl Services {
             host.set_hotkey(hotkey)?;
         }
         self.db.set_hotkey(hotkey).map_err(|e| e.to_string())
+    }
+
+    // --- The vault ----------------------------------------------------------
+
+    pub fn vault(&self) -> &VaultService {
+        &self.vault
+    }
+
+    /// Copies a field of a vault entry as a secret: left out of clipboard
+    /// histories and cleared after 30 seconds.
+    pub fn copy_vault_field(&self, id: &str, field: vault::Field) -> Result<(), String> {
+        let text = self.vault.secret(id, field).map_err(|e| e.to_string())?;
+        capture::copy_secret(&text)
+    }
+
+    /// The host hid the window: locks the vault when the user wants it.
+    pub fn window_hidden(&self) {
+        if self.db.settings().is_ok_and(|s| s.vault_lock_on_hide) {
+            self.vault.lock();
+        }
+    }
+
+    /// Locks the vault (sleep, screen lock).
+    pub fn lock_vault(&self) {
+        self.vault.lock();
     }
 
     // --- Capture ----------------------------------------------------------
@@ -274,7 +315,29 @@ mod tests {
     use super::*;
 
     fn services() -> Services {
-        Services::new(Database::in_memory().unwrap(), PathBuf::from("/tmp"))
+        Services::with_vault(
+            Database::in_memory().unwrap(),
+            PathBuf::from("/tmp"),
+            Box::new(keychain::MemoryKeyStore::default()),
+            KdfParams::INSECURE_TEST,
+        )
+    }
+
+    #[test]
+    fn hiding_the_window_locks_the_vault_when_wanted() {
+        let s = services();
+        s.vault().setup("correct horse battery").unwrap();
+        s.db().set_vault_lock_on_hide(false).unwrap();
+        s.window_hidden();
+        assert_eq!(s.vault().status(), vault::VaultStatus::Unlocked);
+        s.db().set_vault_lock_on_hide(true).unwrap();
+        s.window_hidden();
+        assert_eq!(s.vault().status(), vault::VaultStatus::Locked);
+        s.vault()
+            .unlock("correct horse battery", vault::now_ms())
+            .unwrap();
+        s.lock_vault();
+        assert_eq!(s.vault().status(), vault::VaultStatus::Locked);
     }
 
     #[derive(Default)]

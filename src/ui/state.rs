@@ -9,6 +9,7 @@ use nsh_core::prelude::*;
 use crate::model::{ClipboardItem, DateGroup, Settings, ThemePreference, filter_items};
 use crate::services::services;
 use crate::updater::Release;
+use crate::vault::{EntrySummary, VaultStatus};
 
 /// How long the "copied" check stays on a row.
 const COPIED_FLASH: Duration = Duration::from_millis(1000);
@@ -22,6 +23,7 @@ pub enum Page {
     Main,
     Archive,
     Settings,
+    Vault,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +41,29 @@ pub enum DialogKind {
     Logs,
     Update,
     ConfirmClear,
+    VaultEditor,
+    VaultConfirmDelete,
+    VaultPassword,
+    VaultReset,
+}
+
+impl DialogKind {
+    /// Dialogs that show entries' data, closed when the vault locks.
+    pub fn is_vault(self) -> bool {
+        matches!(
+            self,
+            DialogKind::VaultEditor | DialogKind::VaultConfirmDelete
+        )
+    }
+}
+
+/// What the vault password dialog does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultPurpose {
+    EnableTouchId,
+    ChangePassword,
+    Export,
+    Import,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +109,22 @@ pub struct AppState {
     pub toast: Signal<Option<Toast>>,
     pub list: ElementRef,
     pub search: ElementRef,
+    pub vault_status: Signal<VaultStatus>,
+    /// The entries' summaries while unlocked (never passwords).
+    pub vault_items: Signal<Vec<EntrySummary>>,
+    pub vault_query: Signal<String>,
+    pub vault_visible: Memo<Vec<EntrySummary>>,
+    pub vault_focused: Signal<usize>,
+    /// The entry the editor or the delete dialog is about; `None`: a new one.
+    pub vault_editing: Signal<Option<String>>,
+    /// A slow vault operation (key derivation, Touch ID) is running.
+    pub vault_busy: Signal<bool>,
+    /// The current second, which TOTP codes follow.
+    pub vault_tick: Signal<u64>,
+    pub vault_purpose: Signal<VaultPurpose>,
+    /// The backup file being imported.
+    pub vault_import_text: Signal<String>,
+    pub vault_list: ElementRef,
 }
 
 impl AppState {
@@ -93,6 +134,18 @@ impl AppState {
         let images_only = signal(false);
         let today = signal(Vec::new());
         let favorites = signal(Vec::new());
+        let vault_items = signal(Vec::<EntrySummary>::new());
+        let vault_query = signal(String::new());
+        let vault_visible = computed(move || {
+            let query = vault_query.get();
+            vault_items.with(|items| {
+                items
+                    .iter()
+                    .filter(|i| i.matches(&query))
+                    .cloned()
+                    .collect()
+            })
+        });
         let visible = computed(move || {
             let source = match tab.get() {
                 Tab::History => today,
@@ -126,6 +179,17 @@ impl AppState {
             toast: signal(None),
             list: element_ref(),
             search: element_ref(),
+            vault_status: signal(services().vault().status()),
+            vault_items,
+            vault_query,
+            vault_visible,
+            vault_focused: signal(0),
+            vault_editing: signal(None),
+            vault_busy: signal(false),
+            vault_tick: signal(0),
+            vault_purpose: signal(VaultPurpose::Export),
+            vault_import_text: signal(String::new()),
+            vault_list: element_ref(),
         }
     }
 
@@ -175,6 +239,7 @@ impl AppState {
                 seen_shown.set(shown);
                 self.on_shown();
             }
+            self.watch_vault();
         });
     }
 
@@ -183,9 +248,13 @@ impl AppState {
         self.reload();
         self.focused.set(0);
         self.hovered.set(None);
-        if self.page.get() == Page::Main {
-            self.search.focus();
-            self.scroll_to_focused();
+        match self.page.get() {
+            Page::Main => {
+                self.search.focus();
+                self.scroll_to_focused();
+            }
+            Page::Vault => self.vault_shown(),
+            Page::Archive | Page::Settings => {}
         }
     }
 
@@ -236,6 +305,9 @@ impl AppState {
             page
         };
         self.page.set(next);
+        if next == Page::Vault {
+            self.vault_shown();
+        }
     }
 
     pub fn set_tab(self, tab: Tab) {

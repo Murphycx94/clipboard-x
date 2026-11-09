@@ -47,8 +47,104 @@ impl Captured {
     }
 }
 
-/// Reads the clipboard: non-blank text first, then an image.
+/// How long a copied secret stays on the clipboard.
+pub const SECRET_LIFETIME: Duration = Duration::from_secs(30);
+
+/// Pasteboard types other apps set on secrets (nspasteboard.org).
+const SKIP_TYPES: [&str; 2] = [
+    "org.nspasteboard.ConcealedType",
+    "org.nspasteboard.TransientType",
+];
+
+/// The hash of the secret copied last and when, which the monitor does not
+/// record while it is on the clipboard.
+static LAST_SECRET: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Counts secret copies: only the latest one's timer clears the clipboard.
+static SECRET_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn is_concealed_types<S: AsRef<str>>(types: &[S]) -> bool {
+    types.iter().any(|t| SKIP_TYPES.contains(&t.as_ref()))
+}
+
+fn remember_secret(text: &str) {
+    if let Ok(mut last) = LAST_SECRET.lock() {
+        *last = Some((hash_bytes(text.as_bytes()), std::time::Instant::now()));
+    }
+}
+
+/// Whether `hash` is the secret copied in the last [`SECRET_LIFETIME`]
+/// (with a margin for the monitor's poll).
+fn is_recent_secret(hash: &str) -> bool {
+    let window = SECRET_LIFETIME + POLL_INTERVAL * 4;
+    LAST_SECRET.lock().is_ok_and(|last| {
+        last.as_ref()
+            .is_some_and(|(h, at)| h == hash && at.elapsed() < window)
+    })
+}
+
+/// Whether the clipboard holds a secret another app marked (macOS).
+#[cfg(target_os = "macos")]
+fn clipboard_is_concealed() -> bool {
+    use objc2_app_kit::NSPasteboard;
+    let types = NSPasteboard::generalPasteboard().types();
+    let names: Vec<String> = types
+        .map(|t| t.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    is_concealed_types(&names)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clipboard_is_concealed() -> bool {
+    false
+}
+
+/// Copies `text` marked as a secret (left out of clipboard histories) and
+/// clears it after [`SECRET_LIFETIME`] unless something else was copied.
+pub fn copy_secret(text: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    use arboard::SetExtApple as _;
+    #[cfg(target_os = "linux")]
+    use arboard::SetExtLinux as _;
+    #[cfg(target_os = "windows")]
+    use arboard::SetExtWindows as _;
+    remember_secret(text);
+    let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard
+        .set()
+        .exclude_from_history()
+        .text(text.to_owned())
+        .map_err(|e| e.to_string())?;
+    let hash = hash_bytes(text.as_bytes());
+    let copy = SECRET_COPIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    thread::Builder::new()
+        .name("secret-clear".into())
+        .spawn(move || {
+            thread::sleep(SECRET_LIFETIME);
+            // A later secret copy has a timer of its own.
+            if SECRET_COPIES.load(std::sync::atomic::Ordering::SeqCst) != copy {
+                return;
+            }
+            if let Ok(mut clipboard) = Clipboard::new()
+                && clipboard
+                    .get_text()
+                    .map(zeroize::Zeroizing::new)
+                    .is_ok_and(|t| hash_bytes(t.as_bytes()) == hash)
+            {
+                let _ = clipboard.clear();
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reads the clipboard: non-blank text first, then an image; nothing when
+/// it holds a secret.
 fn read(clipboard: &mut Clipboard) -> Option<Captured> {
+    if clipboard_is_concealed() {
+        return None;
+    }
     if let Ok(text) = clipboard.get_text()
         && !text.trim().is_empty()
     {
@@ -88,6 +184,10 @@ pub fn spawn_monitor(
                 };
                 let hash = captured.hash();
                 if hash == last_hash {
+                    continue;
+                }
+                if is_recent_secret(&hash) {
+                    last_hash = hash;
                     continue;
                 }
                 match captured.store(&db, &hash) {
@@ -204,6 +304,23 @@ mod tests {
             }
             other => panic!("expected an image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn concealed_type_names_are_recognized() {
+        assert!(is_concealed_types(&[
+            "public.utf8-plain-text",
+            "org.nspasteboard.ConcealedType"
+        ]));
+        assert!(is_concealed_types(&["org.nspasteboard.TransientType"]));
+        assert!(!is_concealed_types(&["public.utf8-plain-text"]));
+    }
+
+    #[test]
+    fn our_own_secret_copies_are_skipped() {
+        remember_secret("s3cret");
+        assert!(is_recent_secret(&hash_bytes(b"s3cret")));
+        assert!(!is_recent_secret(&hash_bytes(b"other")));
     }
 
     #[test]

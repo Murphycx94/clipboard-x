@@ -3,10 +3,12 @@
 use nsh_base::{switch, theme};
 use nsh_core::prelude::*;
 
-use crate::model::{RETENTION_OPTIONS, ThemePreference, hotkey_label};
+use crate::model::{RETENTION_OPTIONS, ThemePreference, VAULT_LOCK_OPTIONS, hotkey_label};
+use crate::services::services;
+use crate::vault::VaultStatus;
 
 use super::icons::{Icon, icon};
-use super::state::{AppState, DialogKind};
+use super::state::{AppState, DialogKind, Page, VaultPurpose};
 use super::widgets::{Tone, field, muted, segmented, text_button};
 
 pub fn settings_page(state: AppState) -> impl IntoElement {
@@ -87,6 +89,7 @@ pub fn settings_page(state: AppState) -> impl IntoElement {
                     .into_element(),
                 ],
             ))
+            .child(vault_section(state))
             .child(section(
                 "关于",
                 vec![
@@ -111,6 +114,112 @@ pub fn settings_page(state: AppState) -> impl IntoElement {
                 ],
             )),
     )
+}
+
+/// The vault's settings; a link to the vault page until it is set up.
+fn vault_section(state: AppState) -> impl IntoElement {
+    let set_up = move || state.vault_status.get() != VaultStatus::NotSetUp;
+    when(set_up, move || {
+        let mut rows = vec![
+            row(
+                Icon::Clock,
+                "自动锁定",
+                "无操作多久后锁定密码本",
+                segmented(
+                    VAULT_LOCK_OPTIONS.to_vec(),
+                    move || state.settings.get().vault_lock_minutes,
+                    move |minutes| state.set_vault_lock_minutes(minutes),
+                ),
+            )
+            .into_element(),
+            row(
+                Icon::EyeOff,
+                "收起面板时锁定",
+                "系统睡眠或锁屏时总会锁定",
+                switch_control(
+                    move || state.settings.get().vault_lock_on_hide,
+                    move |on| state.set_vault_lock_on_hide(on),
+                ),
+            )
+            .into_element(),
+        ];
+        if services().vault().touch_id_available() {
+            rows.push(
+                row(
+                    Icon::Shield,
+                    "Touch ID 解锁",
+                    "用 Touch ID 或系统密码代替主密码",
+                    switch_control(
+                        move || state.settings.get().vault_touch_id,
+                        move |on| {
+                            if on {
+                                state.open_vault_password(VaultPurpose::EnableTouchId);
+                            } else {
+                                state.vault_disable_touch_id();
+                            }
+                        },
+                    ),
+                )
+                .into_element(),
+            );
+        }
+        rows.extend([
+            row(
+                Icon::Key,
+                "修改主密码",
+                "需要输入当前主密码",
+                text_button("修改", Tone::Plain, move || {
+                    state.open_vault_password(VaultPurpose::ChangePassword)
+                }),
+            )
+            .into_element(),
+            row(
+                Icon::Archive,
+                "加密备份",
+                "导出为用备份密码加密的 .cxvault 文件，或从中导入（需先解锁）",
+                view()
+                    .flex_row()
+                    .gap(px(6.0))
+                    .child(text_button("导出", Tone::Plain, move || {
+                        if state.vault_status.get() == VaultStatus::Unlocked {
+                            state.open_vault_password(VaultPurpose::Export);
+                        } else {
+                            state.error("请先解锁密码本");
+                        }
+                    }))
+                    .child(text_button("导入", Tone::Plain, move || {
+                        state.vault_pick_import()
+                    })),
+            )
+            .into_element(),
+            row(
+                Icon::Trash,
+                "重置密码本",
+                "删除全部账号和主密码",
+                text_button("重置", Tone::Danger, move || {
+                    state.dialog.set(Some(DialogKind::VaultReset))
+                }),
+            )
+            .into_element(),
+        ]);
+        section("密码本", rows)
+    })
+    .otherwise(move || {
+        section(
+            "密码本",
+            vec![
+                row(
+                    Icon::Key,
+                    "密码本",
+                    "尚未设置：用主密码加密保存账号和密码",
+                    text_button("去设置", Tone::Plain, move || {
+                        state.page.set(Page::Vault)
+                    }),
+                )
+                .into_element(),
+            ],
+        )
+    })
 }
 
 /// A titled group of rows on a card.

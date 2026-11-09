@@ -44,6 +44,9 @@ mod key {
     pub const TELEGRAM_CHAT_ID: &str = "telegram_chat_id";
     pub const THEME: &str = "theme";
     pub const HIDE_ON_BLUR: &str = "hide_on_blur";
+    pub const VAULT_LOCK_MINUTES: &str = "vault_lock_minutes";
+    pub const VAULT_LOCK_ON_HIDE: &str = "vault_lock_on_hide";
+    pub const VAULT_TOUCH_ID: &str = "vault_touch_id";
 }
 
 /// The full content of an item, to copy it back or send it.
@@ -71,6 +74,8 @@ impl Database {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(crate::vault::store::SCHEMA)?;
+        crate::vault::store::migrate(&conn)?;
         let defaults = Settings::default();
         for (key, value) in [
             (key::HOTKEY, DEFAULT_HOTKEY.to_owned()),
@@ -79,6 +84,15 @@ impl Database {
             (key::TELEGRAM_CHAT_ID, String::new()),
             (key::THEME, defaults.theme.as_str().to_owned()),
             (key::HIDE_ON_BLUR, defaults.hide_on_blur.to_string()),
+            (
+                key::VAULT_LOCK_MINUTES,
+                defaults.vault_lock_minutes.to_string(),
+            ),
+            (
+                key::VAULT_LOCK_ON_HIDE,
+                defaults.vault_lock_on_hide.to_string(),
+            ),
+            (key::VAULT_TOUCH_ID, defaults.vault_touch_id.to_string()),
         ] {
             conn.execute(
                 "INSERT OR IGNORE INTO settings(key, value) VALUES (?1, ?2)",
@@ -324,6 +338,18 @@ impl Database {
                 .setting(key::HIDE_ON_BLUR)?
                 .map(|v| v != "false")
                 .unwrap_or(defaults.hide_on_blur),
+            vault_lock_minutes: self
+                .setting(key::VAULT_LOCK_MINUTES)?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(defaults.vault_lock_minutes),
+            vault_lock_on_hide: self
+                .setting(key::VAULT_LOCK_ON_HIDE)?
+                .map(|v| v != "false")
+                .unwrap_or(defaults.vault_lock_on_hide),
+            vault_touch_id: self
+                .setting(key::VAULT_TOUCH_ID)?
+                .map(|v| v == "true")
+                .unwrap_or(defaults.vault_touch_id),
         })
     }
 
@@ -349,6 +375,23 @@ impl Database {
 
     pub fn set_hide_on_blur(&self, hide: bool) -> Result<()> {
         self.set_setting(key::HIDE_ON_BLUR, &hide.to_string())
+    }
+
+    /// Runs `f` with the connection (the vault's store).
+    pub(crate) fn with_conn<R>(&self, f: impl FnOnce(&Connection) -> R) -> R {
+        f(&self.conn())
+    }
+
+    pub fn set_vault_lock_minutes(&self, minutes: i64) -> Result<()> {
+        self.set_setting(key::VAULT_LOCK_MINUTES, &minutes.to_string())
+    }
+
+    pub fn set_vault_lock_on_hide(&self, on: bool) -> Result<()> {
+        self.set_setting(key::VAULT_LOCK_ON_HIDE, &on.to_string())
+    }
+
+    pub fn set_vault_touch_id(&self, on: bool) -> Result<()> {
+        self.set_setting(key::VAULT_TOUCH_ID, &on.to_string())
     }
 }
 
@@ -381,9 +424,12 @@ mod tests {
     #[test]
     fn same_text_moves_to_the_top_instead_of_duplicating() {
         let db = db();
-        db.insert_text_at("first", "h1", "2020-01-01T10:00:00.000").unwrap();
-        db.insert_text_at("second", "h2", "2020-01-01T10:00:01.000").unwrap();
-        db.insert_text_at("first", "h1", "2020-01-01T10:00:02.000").unwrap();
+        db.insert_text_at("first", "h1", "2020-01-01T10:00:00.000")
+            .unwrap();
+        db.insert_text_at("second", "h2", "2020-01-01T10:00:01.000")
+            .unwrap();
+        db.insert_text_at("first", "h1", "2020-01-01T10:00:02.000")
+            .unwrap();
         let items = db.archive_groups().unwrap().remove(0).items;
         let texts: Vec<_> = items
             .iter()
@@ -494,6 +540,24 @@ mod tests {
         assert_eq!(db.today_items().unwrap().len(), 1);
         assert_eq!(db.clear_history().unwrap(), 1);
         assert_eq!(db.favorite_items().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn vault_settings_have_defaults_and_save() {
+        let db = db();
+        let s = db.settings().unwrap();
+        assert_eq!(
+            (s.vault_lock_minutes, s.vault_lock_on_hide, s.vault_touch_id),
+            (5, true, false)
+        );
+        db.set_vault_lock_minutes(15).unwrap();
+        db.set_vault_lock_on_hide(false).unwrap();
+        db.set_vault_touch_id(true).unwrap();
+        let s = db.settings().unwrap();
+        assert_eq!(
+            (s.vault_lock_minutes, s.vault_lock_on_hide, s.vault_touch_id),
+            (15, false, true)
+        );
     }
 
     #[test]

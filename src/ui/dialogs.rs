@@ -22,6 +22,7 @@ pub fn dialogs(state: AppState) -> impl IntoElement {
         .child(when(is(DialogKind::ConfirmClear), move || {
             confirm_clear_dialog(state)
         }))
+        .child(super::vault::vault_dialogs(state))
 }
 
 fn buttons(children: Vec<AnyElement>) -> impl IntoElement {

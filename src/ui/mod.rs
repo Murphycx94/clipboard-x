@@ -9,6 +9,7 @@ mod keys;
 mod main_panel;
 mod settings;
 mod state;
+mod vault;
 mod widgets;
 
 use nsh_base::theme;
@@ -46,7 +47,8 @@ pub fn App() -> impl IntoElement {
                 }))
                 .child(when(page_is(Page::Settings), move || {
                     settings::settings_page(state)
-                })),
+                }))
+                .child(when(page_is(Page::Vault), move || vault::vault_page(state))),
         )
         .child(widgets::toast_layer(state))
         .child(dialogs::dialogs(state))
