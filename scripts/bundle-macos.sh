@@ -81,7 +81,11 @@ if $make_dmg; then
   cp -R "$app" "$staging/"
   ln -s /Applications "$staging/Applications"
   rm -f "$dmg"
-  hdiutil create -volname ClipboardX -srcfolder "$staging" -ov -format UDZO "$dmg" >/dev/null
+  # hdiutil's own estimate from -srcfolder can come out too small ("No
+  # space left on device"): give it the content's size plus a margin.
+  size_mb=$(( $(du -sm "$staging" | cut -f1) * 12 / 10 + 20 ))
+  hdiutil create -volname ClipboardX -srcfolder "$staging" -size "${size_mb}m" \
+    -fs HFS+ -ov -format UDZO "$dmg" >/dev/null
   rm -rf "$staging"
   echo "built $dmg"
 fi
