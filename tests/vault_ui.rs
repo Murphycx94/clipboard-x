@@ -9,7 +9,7 @@ use nsh_engine::EngineConfig;
 use nsh_testing::Headless;
 
 mod common;
-use common::{fill_checks, shown_phrase, wait};
+use common::{SLOW, fill_checks, shown_phrase, wait};
 
 const MASTER: &str = "correct horse battery";
 const NEW_MASTER: &str = "a brand new master pass";
@@ -61,8 +61,10 @@ fn vault_setup_entries_lock_and_unlock() {
     fill_checks(&mut app, &words, false);
     app.press("创建密码本").unwrap();
     wait(&mut app, "还没有保存任何账号");
-    // The background setup is done once it says so.
-    wait(&mut app, "密码本已创建");
+    assert_eq!(
+        services().vault().status(),
+        clipboardx::vault::VaultStatus::Unlocked
+    );
 
     app.press("新建").unwrap();
     wait(&mut app, "新建账号");
@@ -105,7 +107,7 @@ fn vault_setup_entries_lock_and_unlock() {
     app.type_text("id:recovery-phrase", &words.join(" "))
         .unwrap();
     app.press("重置主密码").unwrap();
-    wait(&mut app, "主密码已重置");
+    app.wait_for_gone("id:recovery-phrase", SLOW).unwrap();
     wait(&mut app, "GitHub");
     app.press("label:锁定").unwrap();
     wait(&mut app, "密码本已锁定");
@@ -137,7 +139,8 @@ fn vault_setup_entries_lock_and_unlock() {
     fill_checks(&mut app, &new_words, false);
     app.type_text("id:recovery-password", NEW_MASTER).unwrap();
     app.press("确认").unwrap();
-    wait(&mut app, "助记词已设置，请妥善保管抄写的纸张");
+    app.wait_for_gone("id:recovery-password", SLOW).unwrap();
+    assert!(services().vault().has_recovery_phrase());
     let phrase = clipboardx::vault::recovery::RecoveryKey::parse(&new_words.concat()).unwrap();
     services().vault().lock();
     services().vault().recover(&phrase, MASTER).unwrap();
