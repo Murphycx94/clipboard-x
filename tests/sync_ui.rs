@@ -84,7 +84,8 @@ fn sync_is_turned_on_from_the_settings() {
         .unwrap();
     app.type_text("id:sync-password", MASTER).unwrap();
     app.press("开启同步").unwrap();
-    wait(&mut app, "云同步已开启");
+    // The dialog closes once sync is on (its toast may be gone already).
+    app.wait_for_gone("id:sync-password", common::SLOW).unwrap();
     wait(&mut app, &format!("text:{url}"));
     wait(&mut app, "text:/^上次同步 /");
 

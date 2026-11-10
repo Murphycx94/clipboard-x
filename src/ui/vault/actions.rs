@@ -52,7 +52,10 @@ impl AppState {
         let minutes = untracked(move || self.settings.with(|s| s.vault_lock_minutes));
         let vault = services().vault();
         vault.lock_if_idle(now_ms(), minutes);
-        if vault.status() != untracked(move || self.vault_status.get()) {
+        // While a vault operation runs it refreshes the page itself when
+        // done: switching earlier would show a page that is still busy.
+        let busy = untracked(move || self.vault_busy.get());
+        if !busy && vault.status() != untracked(move || self.vault_status.get()) {
             self.refresh_vault();
         }
         // Another device changed the master password: ask once.

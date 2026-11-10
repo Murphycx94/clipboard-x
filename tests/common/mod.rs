@@ -67,6 +67,8 @@ pub fn create_vault(app: &mut Headless, master: &str) -> Vec<String> {
     wait(app, "确认助记词");
     fill_checks(app, &words, false);
     app.press("创建密码本").unwrap();
-    wait(app, "密码本已创建");
+    // The empty list, not the toast: the toast may be gone by the time a
+    // slow machine looks.
+    wait(app, "还没有保存任何账号");
     words
 }
