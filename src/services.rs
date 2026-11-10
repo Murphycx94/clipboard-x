@@ -74,7 +74,28 @@ impl Services {
         });
         let services = Services::new(db, dir.to_owned());
         services.cleanup_expired();
+        services.upgrade_thumbnails();
         services
+    }
+
+    /// Remakes thumbnails made an older way, on a thread of its own; the UI
+    /// reloads when they are done.
+    fn upgrade_thumbnails(&self) {
+        let db = self.db.clone();
+        let version = self.data_version.clone();
+        let spawned = std::thread::Builder::new()
+            .name("thumbnails".into())
+            .spawn(move || match capture::regenerate_thumbnails(&db) {
+                Ok(0) => {}
+                Ok(n) => {
+                    log::info!("remade {n} thumbnails");
+                    version.fetch_add(1, Ordering::AcqRel);
+                }
+                Err(e) => log::error!("cannot remake thumbnails: {e}"),
+            });
+        if let Err(e) = spawned {
+            log::error!("cannot start remaking thumbnails: {e}");
+        }
     }
 
     pub fn new(db: Database, data_dir: PathBuf) -> Services {
