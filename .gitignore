@@ -4,3 +4,8 @@ dist/
 node_modules/
 .DS_Store
 .env
+# Sync server data and real configuration (examples are tracked)
+server/data/
+data/
+*.env
+!*.env.example

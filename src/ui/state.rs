@@ -45,6 +45,15 @@ pub enum DialogKind {
     VaultConfirmDelete,
     VaultPassword,
     VaultReset,
+    /// Setting a new recovery phrase (it shows the phrase).
+    VaultRecoveryPhrase,
+    /// Resetting a forgotten master password with the phrase.
+    VaultRecover,
+    SyncSetup,
+    SyncSecretKey,
+    SyncPair,
+    SyncDevices,
+    SyncNewPassword,
 }
 
 impl DialogKind {
@@ -52,7 +61,7 @@ impl DialogKind {
     pub fn is_vault(self) -> bool {
         matches!(
             self,
-            DialogKind::VaultEditor | DialogKind::VaultConfirmDelete
+            DialogKind::VaultEditor | DialogKind::VaultConfirmDelete | DialogKind::SyncSecretKey
         )
     }
 }
@@ -64,6 +73,22 @@ pub enum VaultPurpose {
     ChangePassword,
     Export,
     Import,
+    RevealSecretKey,
+}
+
+/// Setting up sync on this device: the first one, or one joining.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    First,
+    Join,
+}
+
+/// The sync setup form, kept between its two steps (never the password).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncForm {
+    pub url: String,
+    pub code: String,
+    pub device_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +150,20 @@ pub struct AppState {
     /// The backup file being imported.
     pub vault_import_text: Signal<String>,
     pub vault_list: ElementRef,
+    pub sync_on: Signal<bool>,
+    pub sync_server: Signal<String>,
+    pub sync_status: Signal<crate::cloud::Status>,
+    pub sync_mode: Signal<SyncMode>,
+    pub sync_form: Signal<SyncForm>,
+    /// The secret key shown while sync is set up or when revealed; cleared
+    /// when its dialog closes.
+    pub sync_secret: Signal<String>,
+    /// The secret key dialog only shows the key (no setup step).
+    pub sync_secret_reveal: Signal<bool>,
+    pub sync_pair: Signal<Option<clipboardx_sync_proto::PairingCode>>,
+    pub sync_devices: Signal<Vec<clipboardx_sync_proto::Device>>,
+    /// The new-password prompt was shown for the waiting header.
+    pub sync_prompted: Signal<bool>,
 }
 
 impl AppState {
@@ -190,6 +229,16 @@ impl AppState {
             vault_purpose: signal(VaultPurpose::Export),
             vault_import_text: signal(String::new()),
             vault_list: element_ref(),
+            sync_on: signal(false),
+            sync_server: signal(String::new()),
+            sync_status: signal(crate::cloud::Status::default()),
+            sync_mode: signal(SyncMode::First),
+            sync_form: signal(SyncForm::default()),
+            sync_secret: signal(String::new()),
+            sync_secret_reveal: signal(false),
+            sync_pair: signal(None),
+            sync_devices: signal(Vec::new()),
+            sync_prompted: signal(false),
         }
     }
 

@@ -107,10 +107,26 @@ pub fn derive_key(
     salt: &[u8],
     params: KdfParams,
 ) -> Result<SecretKey, CryptoError> {
+    derive_key_keyed(password, salt, params, None)
+}
+
+/// The key-encryption key of `password` and, when given, the secret key
+/// (Argon2's keyed mode: without it, the password cannot be tried).
+pub fn derive_key_keyed(
+    password: &str,
+    salt: &[u8],
+    params: KdfParams,
+    secret: Option<&[u8]>,
+) -> Result<SecretKey, CryptoError> {
     let costs =
         Params::new(params.m, params.t, params.p, Some(KEY_LEN)).map_err(|_| CryptoError::Kdf)?;
     let mut out = Zeroizing::new([0_u8; KEY_LEN]);
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, costs)
+    let argon = match secret {
+        Some(secret) => Argon2::new_with_secret(secret, Algorithm::Argon2id, Version::V0x13, costs)
+            .map_err(|_| CryptoError::Kdf)?,
+        None => Argon2::new(Algorithm::Argon2id, Version::V0x13, costs),
+    };
+    argon
         .hash_password_into(password.as_bytes(), salt, out.as_mut())
         .map_err(|_| CryptoError::Kdf)?;
     Ok(SecretKey(out))
@@ -268,6 +284,17 @@ mod tests {
             unwrap_key(&kek2, &rewrapped).unwrap().as_bytes(),
             dek.as_bytes()
         );
+    }
+
+    #[test]
+    fn the_secret_changes_the_key() {
+        let plain = derive_key("pw", b"0123456789abcdef", P).unwrap();
+        let keyed = derive_key_keyed("pw", b"0123456789abcdef", P, Some(&[1; 16])).unwrap();
+        let other = derive_key_keyed("pw", b"0123456789abcdef", P, Some(&[2; 16])).unwrap();
+        assert_ne!(plain.as_bytes(), keyed.as_bytes());
+        assert_ne!(keyed.as_bytes(), other.as_bytes());
+        let again = derive_key_keyed("pw", b"0123456789abcdef", P, Some(&[1; 16])).unwrap();
+        assert_eq!(keyed.as_bytes(), again.as_bytes());
     }
 
     #[test]

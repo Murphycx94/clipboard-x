@@ -1,63 +1,104 @@
-//! Where the Touch ID copy of the data key lives.
+//! What the vault keeps on this device only: the Touch ID copy of the data
+//! key (read after the system asks the user), the secret key and the sync
+//! device token (read silently, as 1Password keeps its secret key).
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
-use super::crypto::SecretKey;
+use zeroize::Zeroizing;
+
+/// An item of the key store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyItem {
+    /// The data key, for Touch ID unlocking.
+    DataKey,
+    /// The secret key, the second factor of the key derivation.
+    SecretKey,
+    /// The sync server's device token.
+    DeviceToken,
+}
+
+impl KeyItem {
+    fn account(self) -> &'static str {
+        match self {
+            KeyItem::DataKey => "data-key",
+            KeyItem::SecretKey => "secret-key",
+            KeyItem::DeviceToken => "device-token",
+        }
+    }
+}
 
 pub trait KeyStore: Send + Sync {
-    /// Whether this machine can unlock with Touch ID or the system password.
+    /// Whether the system can confirm the user (Touch ID or the login
+    /// password) before [`KeyStore::get_with_auth`].
     fn available(&self) -> bool;
-    fn save(&self, key: &SecretKey) -> Result<(), String>;
-    /// Asks the user (`reason` shown) and reads the key. Blocking.
-    fn load(&self, reason: &str) -> Result<SecretKey, String>;
-    /// Whether a key is stored, without asking the user.
-    fn has_key(&self) -> bool;
-    fn delete(&self);
+    fn put(&self, item: KeyItem, bytes: &[u8]) -> Result<(), String>;
+    /// The item, without asking the user.
+    fn get(&self, item: KeyItem) -> Option<Zeroizing<Vec<u8>>>;
+    /// The item after the system confirmed the user (`reason` shown). Blocking.
+    fn get_with_auth(&self, item: KeyItem, reason: &str) -> Result<Zeroizing<Vec<u8>>, String>;
+    fn delete(&self, item: KeyItem);
 }
 
-/// No Touch ID (other platforms).
-pub struct NoKeyStore;
-
-impl KeyStore for NoKeyStore {
-    fn available(&self) -> bool {
-        false
-    }
-    fn save(&self, _: &SecretKey) -> Result<(), String> {
-        Err("此平台不支持 Touch ID".into())
-    }
-    fn load(&self, _: &str) -> Result<SecretKey, String> {
-        Err("此平台不支持 Touch ID".into())
-    }
-    fn has_key(&self) -> bool {
-        false
-    }
-    fn delete(&self) {}
+/// In memory, for the process's life: tests, and platforms without a
+/// keychain of ours yet. `auth` says whether it plays Touch ID (always
+/// approving).
+pub struct MemoryKeyStore {
+    items: Mutex<HashMap<KeyItem, Zeroizing<Vec<u8>>>>,
+    auth: bool,
 }
 
-/// In memory, always approving (tests).
-#[derive(Default)]
-pub struct MemoryKeyStore(Mutex<Option<[u8; super::crypto::KEY_LEN]>>);
+impl MemoryKeyStore {
+    /// A store that approves every confirmation (tests of Touch ID).
+    pub fn with_auth() -> MemoryKeyStore {
+        MemoryKeyStore {
+            items: Mutex::new(HashMap::new()),
+            auth: true,
+        }
+    }
+
+    /// A store without Touch ID.
+    pub fn without_auth() -> MemoryKeyStore {
+        MemoryKeyStore {
+            auth: false,
+            ..MemoryKeyStore::with_auth()
+        }
+    }
+}
+
+impl Default for MemoryKeyStore {
+    fn default() -> Self {
+        MemoryKeyStore::with_auth()
+    }
+}
 
 impl KeyStore for MemoryKeyStore {
     fn available(&self) -> bool {
-        true
+        self.auth
     }
-    fn save(&self, key: &SecretKey) -> Result<(), String> {
-        *self.0.lock().map_err(|e| e.to_string())? = Some(*key.as_bytes());
+
+    fn put(&self, item: KeyItem, bytes: &[u8]) -> Result<(), String> {
+        self.items
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(item, Zeroizing::new(bytes.to_vec()));
         Ok(())
     }
-    fn load(&self, _: &str) -> Result<SecretKey, String> {
-        let stored = *self.0.lock().map_err(|e| e.to_string())?;
-        stored
-            .ok_or_else(|| "没有保存的密钥".to_owned())
-            .and_then(|b| SecretKey::from_slice(&b).map_err(|e| e.to_string()))
+
+    fn get(&self, item: KeyItem) -> Option<Zeroizing<Vec<u8>>> {
+        self.items.lock().ok()?.get(&item).cloned()
     }
-    fn has_key(&self) -> bool {
-        self.0.lock().is_ok_and(|stored| stored.is_some())
+
+    fn get_with_auth(&self, item: KeyItem, _reason: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+        if !self.auth {
+            return Err("此设备不支持 Touch ID".into());
+        }
+        self.get(item).ok_or_else(|| "没有保存的密钥".to_owned())
     }
-    fn delete(&self) {
-        if let Ok(mut stored) = self.0.lock() {
-            *stored = None;
+
+    fn delete(&self, item: KeyItem) {
+        if let Ok(mut items) = self.items.lock() {
+            items.remove(&item);
         }
     }
 }
@@ -72,19 +113,42 @@ mod mac {
     use objc2::runtime::Bool;
     use objc2_foundation::{NSError, NSString};
     use objc2_local_authentication::{LAContext, LAPolicy};
+    use zeroize::Zeroizing;
 
-    use super::super::crypto::SecretKey;
-    use super::KeyStore;
+    use super::{KeyItem, KeyStore};
 
     const SERVICE: &str = "com.clipboardx.app.vault";
-    const ACCOUNT: &str = "data-key";
     const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+    /// errSecItemNotFound: deleting what is not there.
+    const NOT_FOUND: i32 = -25300;
 
+    /// The login keychain, items readable by this app only.
     pub struct MacKeyStore;
 
     fn context() -> Retained<LAContext> {
         // SAFETY: plain allocation and init of LAContext.
         unsafe { LAContext::new() }
+    }
+
+    /// Asks the system to confirm the user; blocking.
+    fn confirm_user(reason: &str) -> Result<(), String> {
+        let (tx, rx) = mpsc::channel::<bool>();
+        let reply = RcBlock::new(move |ok: Bool, _error: *mut NSError| {
+            let _ = tx.send(ok.as_bool());
+        });
+        let ctx = context();
+        // SAFETY: the block is 'static and only sends on a channel (sendable).
+        unsafe {
+            ctx.evaluatePolicy_localizedReason_reply(
+                LAPolicy::DeviceOwnerAuthentication,
+                &NSString::from_str(reason),
+                &reply,
+            );
+        }
+        match rx.recv_timeout(PROMPT_TIMEOUT) {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => Err("已取消验证".into()),
+        }
     }
 
     impl KeyStore for MacKeyStore {
@@ -97,65 +161,75 @@ mod mac {
             }
         }
 
-        fn save(&self, key: &SecretKey) -> Result<(), String> {
-            security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, key.as_bytes())
+        fn put(&self, item: KeyItem, bytes: &[u8]) -> Result<(), String> {
+            security_framework::passwords::set_generic_password(SERVICE, item.account(), bytes)
                 .map_err(|e| format!("无法写入钥匙串：{e}"))
         }
 
-        fn load(&self, reason: &str) -> Result<SecretKey, String> {
-            let (tx, rx) = mpsc::channel::<bool>();
-            let reply = RcBlock::new(move |ok: Bool, _error: *mut NSError| {
-                let _ = tx.send(ok.as_bool());
-            });
-            let ctx = context();
-            // SAFETY: the block is 'static and only sends on a channel (sendable).
-            unsafe {
-                ctx.evaluatePolicy_localizedReason_reply(
-                    LAPolicy::DeviceOwnerAuthentication,
-                    &NSString::from_str(reason),
-                    &reply,
-                );
-            }
-            match rx.recv_timeout(PROMPT_TIMEOUT) {
-                Ok(true) => {}
-                Ok(false) | Err(_) => return Err("已取消验证".into()),
-            }
-            let bytes = zeroize::Zeroizing::new(
-                security_framework::passwords::get_generic_password(SERVICE, ACCOUNT)
-                    .map_err(|_| "钥匙串中没有密钥".to_owned())?,
-            );
-            SecretKey::from_slice(&bytes).map_err(|e| e.to_string())
+        fn get(&self, item: KeyItem) -> Option<Zeroizing<Vec<u8>>> {
+            security_framework::passwords::get_generic_password(SERVICE, item.account())
+                .ok()
+                .map(Zeroizing::new)
         }
 
-        fn has_key(&self) -> bool {
-            security_framework::passwords::get_generic_password(SERVICE, ACCOUNT)
-                .map(zeroize::Zeroizing::new)
-                .is_ok()
+        fn get_with_auth(&self, item: KeyItem, reason: &str) -> Result<Zeroizing<Vec<u8>>, String> {
+            confirm_user(reason)?;
+            self.get(item).ok_or_else(|| "钥匙串中没有密钥".to_owned())
         }
 
-        fn delete(&self) {
-            // Not found is the usual case; anything else is worth a line.
-            const NOT_FOUND: i32 = -25300; // errSecItemNotFound
-            if let Err(e) = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT)
+        fn delete(&self, item: KeyItem) {
+            if let Err(e) =
+                security_framework::passwords::delete_generic_password(SERVICE, item.account())
                 && e.code() != NOT_FOUND
             {
-                log::warn!("cannot delete the Touch ID key: {e}");
+                log::warn!("cannot delete keychain item {item:?}: {e}");
             }
         }
     }
 }
 
-/// Set to anything to keep away from the system keychain (tests): no
-/// Touch ID then.
+/// Set to anything to keep away from the system keychain (tests): items
+/// then live in memory, without Touch ID.
 pub const NO_KEYCHAIN_ENV: &str = "CLIPBOARDX_NO_KEYCHAIN";
 
 /// The platform's store.
 pub fn platform() -> Box<dyn KeyStore> {
     if std::env::var_os(NO_KEYCHAIN_ENV).is_some() {
-        return Box::new(NoKeyStore);
+        return Box::new(MemoryKeyStore::without_auth());
     }
     #[cfg(target_os = "macos")]
     return Box::new(mac::MacKeyStore);
     #[cfg(not(target_os = "macos"))]
-    Box::new(NoKeyStore)
+    Box::new(MemoryKeyStore::without_auth())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_store_keeps_items_apart() {
+        let store = MemoryKeyStore::with_auth();
+        store.put(KeyItem::SecretKey, b"sk").unwrap();
+        store.put(KeyItem::DataKey, b"dk").unwrap();
+        assert_eq!(store.get(KeyItem::SecretKey).unwrap().as_slice(), b"sk");
+        assert_eq!(
+            store
+                .get_with_auth(KeyItem::DataKey, "r")
+                .unwrap()
+                .as_slice(),
+            b"dk"
+        );
+        store.delete(KeyItem::DataKey);
+        assert!(store.get(KeyItem::DataKey).is_none());
+        assert!(store.get(KeyItem::DeviceToken).is_none());
+    }
+
+    #[test]
+    fn without_auth_refuses_confirmation() {
+        let store = MemoryKeyStore::without_auth();
+        store.put(KeyItem::DataKey, b"dk").unwrap();
+        assert!(!store.available());
+        assert!(store.get_with_auth(KeyItem::DataKey, "r").is_err());
+    }
 }

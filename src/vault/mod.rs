@@ -1,29 +1,39 @@
 //! The password vault: everything secret lives under this module.
 
+pub mod account_key;
 pub mod backup;
 pub mod crypto;
 pub mod entry;
 pub mod error;
 pub mod generator;
 pub mod keychain;
+pub mod recovery;
 pub mod store;
+pub mod sync;
 pub mod totp;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::db::Database;
+use account_key::AccountKey;
 pub use crypto::KdfParams;
 use crypto::{
-    SALT_LEN, Sealed, SecretKey, derive_key, open, random_bytes, seal, unwrap_key, wrap_key,
+    SALT_LEN, Sealed, SecretKey, derive_key_keyed, open, random_bytes, seal, unwrap_key, wrap_key,
 };
 pub use entry::{EntrySummary, VaultEntry};
 pub use error::VaultError;
-use keychain::KeyStore;
+use keychain::{KeyItem, KeyStore};
+use recovery::RecoveryKey;
 use store::{EntryRow, MetaRow};
 
 pub const MIN_PASSWORD_CHARS: usize = 10;
-const FORMAT_VERSION: i64 = 1;
+/// Key formats (`vault_meta.version`): the master password alone, or with
+/// the secret key.
+const PASSWORD_ONLY: i64 = 1;
+const WITH_ACCOUNT_KEY: i64 = 2;
+/// What a deletion marker seals.
+const DELETED: &[u8] = b"null";
 /// Failures before waiting starts.
 const FREE_TRIES: u32 = 3;
 const MAX_WAIT_MS: u64 = 60_000;
@@ -70,6 +80,16 @@ pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The associated data of an entry's ciphertext: its id, and its revision
+/// once it has one, so an old revision cannot stand in for a newer one.
+fn aad(id: &str, revision: u64) -> Vec<u8> {
+    if revision == 0 {
+        id.as_bytes().to_vec()
+    } else {
+        format!("{id}:{revision}").into_bytes()
+    }
 }
 
 fn timestamp() -> String {
@@ -132,33 +152,280 @@ impl VaultService {
 
     /// Creates the vault with `password` and leaves it unlocked.
     pub fn setup(&self, password: &str) -> Result<(), VaultError> {
+        self.create(password, None)
+    }
+
+    /// Creates the vault with `password` and the recovery phrase `phrase`
+    /// (which the user has written down) and leaves it unlocked.
+    pub fn setup_with_recovery(
+        &self,
+        password: &str,
+        phrase: &RecoveryKey,
+    ) -> Result<(), VaultError> {
+        self.create(password, Some(phrase))
+    }
+
+    fn create(&self, password: &str, phrase: Option<&RecoveryKey>) -> Result<(), VaultError> {
         if self.meta()?.is_some() {
             return Err(VaultError::AlreadySetUp);
         }
         check_strength(password)?;
         let generation = self.generation();
-        // A Touch ID key of an earlier vault must not outlive it (the key
-        // check would refuse it anyway).
-        self.keys.delete();
+        // Keys of an earlier vault must not outlive it (the key check would
+        // refuse them anyway).
+        self.forget_device_keys();
         let dek = SecretKey::random()?;
-        let meta = self.new_meta(password, &dek)?;
+        let meta = self.new_meta(password, &dek, None, phrase)?;
         self.db.with_conn(|c| store::save_meta(c, &meta))?;
         self.open_session(dek, now_ms(), generation)
     }
 
-    /// The vault's metadata for `password` and data key `dek`.
-    fn new_meta(&self, password: &str, dek: &SecretKey) -> Result<MetaRow, VaultError> {
+    /// The vault's metadata for `password` (and the secret key, when sync
+    /// is on, and the recovery phrase, when there is one) and data key
+    /// `dek`.
+    fn new_meta(
+        &self,
+        password: &str,
+        dek: &SecretKey,
+        account_key: Option<&AccountKey>,
+        phrase: Option<&RecoveryKey>,
+    ) -> Result<MetaRow, VaultError> {
         let salt = random_bytes::<SALT_LEN>()?;
-        let kek = derive_key(password, &salt, self.params)?;
+        let secret = account_key.map(|k| &k.as_bytes()[..]);
+        let kek = derive_key_keyed(password, &salt, self.params, secret)?;
         Ok(MetaRow {
-            version: FORMAT_VERSION,
+            version: if account_key.is_some() {
+                WITH_ACCOUNT_KEY
+            } else {
+                PASSWORD_ONLY
+            },
             params: self.params,
             salt: salt.to_vec(),
             wrapped_dek: wrap_key(&kek, dek)?,
             key_check: key_check(dek)?,
+            recovery_wrap: match phrase {
+                Some(phrase) => recovery::wrap(phrase, dek, account_key)?,
+                None => Vec::new(),
+            },
+            recovery_sealed: match phrase {
+                Some(phrase) => recovery::seal_key(dek, phrase)?,
+                None => Vec::new(),
+            },
             failed_tries: 0,
             locked_until_ms: 0,
         })
+    }
+
+    /// The recovery phrase `meta` keeps under `dek`, to wrap a new data
+    /// key for it. One that does not open is lost (the settings show the
+    /// vault without a phrase).
+    fn phrase_of(meta: &MetaRow, dek: &SecretKey) -> Option<RecoveryKey> {
+        if meta.recovery_sealed.is_empty() {
+            return None;
+        }
+        recovery::open_key(dek, &meta.recovery_sealed)
+            .inspect_err(|_| log::warn!("the recovery phrase does not open: dropped"))
+            .ok()
+    }
+
+    /// The data key (and secret key) `phrase` unwraps from `meta`, if it is
+    /// that vault's key.
+    fn open_with_phrase(
+        meta: &MetaRow,
+        phrase: &RecoveryKey,
+    ) -> Option<(SecretKey, Option<AccountKey>)> {
+        if meta.recovery_wrap.is_empty() {
+            return None;
+        }
+        let (dek, account_key) = recovery::unwrap(phrase, &meta.recovery_wrap).ok()?;
+        matches_check(&dek, &meta.key_check).then_some((dek, account_key))
+    }
+
+    /// The secret key `meta` needs, from this device.
+    fn account_key_for(&self, meta: &MetaRow) -> Result<Option<AccountKey>, VaultError> {
+        if meta.version < WITH_ACCOUNT_KEY {
+            return Ok(None);
+        }
+        self.stored_account_key()
+            .map(Some)
+            .ok_or(VaultError::SecretKeyNeeded)
+    }
+
+    /// Writes `meta` and `rows` atomically. When syncing, `meta` becomes the
+    /// next header, its digest sealed under `previous` (the data key the
+    /// other devices hold) so they can tell this device made it.
+    fn save_header(
+        &self,
+        meta: &MetaRow,
+        rows: &[EntryRow],
+        previous: &SecretKey,
+    ) -> Result<(), VaultError> {
+        self.db.with_conn(|c| {
+            let tx = c.unchecked_transaction()?;
+            store::save_meta(&tx, meta)?;
+            for row in rows {
+                store::upsert_entry(&tx, row)?;
+            }
+            if let Some(mut sync) = store::load_sync(&tx)? {
+                sync.header_version += 1;
+                let header = sync::header_of(meta, sync.header_version, None);
+                sync.header_auth = Some(sync::header_auth(previous, &header)?);
+                sync.staged_header = None;
+                store::save_sync(&tx, &sync)?;
+            }
+            tx.commit()?;
+            Ok::<_, VaultError>(())
+        })
+    }
+
+    /// Moves the vault to a new data key under `password` (with the secret
+    /// key and the recovery phrase given): every entry is encrypted again,
+    /// so an old copy of the database opens none of them. The vault is left
+    /// unlocked.
+    fn rekey(
+        &self,
+        old: &SecretKey,
+        password: &str,
+        account_key: Option<&AccountKey>,
+        phrase: Option<&RecoveryKey>,
+        generation: u64,
+    ) -> Result<(), VaultError> {
+        let new_dek = SecretKey::random()?;
+        let rows = self
+            .db
+            .with_conn(store::load_entries)?
+            .into_iter()
+            // A corrupt entry stays as it was.
+            .filter_map(|row| self.reseal(old, &new_dek, &row, row.revision + 1).ok())
+            .collect::<Vec<_>>();
+        let meta = self.new_meta(password, &new_dek, account_key, phrase)?;
+        self.save_header(&meta, &rows, old)?;
+        // A Touch ID copy follows the new key, or goes.
+        if self.keys.get(KeyItem::DataKey).is_some()
+            && self.keys.put(KeyItem::DataKey, new_dek.as_bytes()).is_err()
+        {
+            self.keys.delete(KeyItem::DataKey);
+        }
+        // Locked meanwhile: the key changed all the same.
+        let _ = self.open_session(new_dek, now_ms(), generation);
+        Ok(())
+    }
+
+    /// Whether the vault has a recovery phrase.
+    pub fn has_recovery_phrase(&self) -> bool {
+        self.meta()
+            .ok()
+            .flatten()
+            .is_some_and(|m| !m.recovery_sealed.is_empty())
+    }
+
+    /// Checks the master password (behind the backoff), leaving the vault as
+    /// it is.
+    pub fn check_password(&self, password: &str) -> Result<(), VaultError> {
+        self.verify(password, now_ms()).map(|_| ())
+    }
+
+    /// Sets the recovery phrase to `phrase`, after the master password. A
+    /// phrase replacing another comes with a new data key, so the old phrase
+    /// opens no copy of the vault made from now on.
+    pub fn set_recovery_phrase(
+        &self,
+        password: &str,
+        phrase: &RecoveryKey,
+    ) -> Result<(), VaultError> {
+        let generation = self.generation();
+        let (meta, dek) = self.verify(password, now_ms())?;
+        // A newer header waits: what this device would write goes under it.
+        if self.has_staged_header() {
+            return Err(VaultError::HeaderChanged);
+        }
+        let account_key = self.account_key_for(&meta)?;
+        if !meta.recovery_sealed.is_empty() {
+            return self.rekey(
+                &dek,
+                password,
+                account_key.as_ref(),
+                Some(phrase),
+                generation,
+            );
+        }
+        let meta = MetaRow {
+            recovery_wrap: recovery::wrap(phrase, &dek, account_key.as_ref())?,
+            recovery_sealed: recovery::seal_key(&dek, phrase)?,
+            ..meta
+        };
+        self.save_header(&meta, &[], &dek)?;
+        let _ = self.open_session(dek, now_ms(), generation);
+        Ok(())
+    }
+
+    /// Opens the vault with its recovery phrase (the master password, and
+    /// the secret key, forgotten or not on this device) and sets
+    /// `new_password`; the phrase stays. A newer header from another device,
+    /// when one waits, is the one to open.
+    pub fn recover(&self, phrase: &RecoveryKey, new_password: &str) -> Result<(), VaultError> {
+        check_strength(new_password)?;
+        let generation = self.generation();
+        let meta = self.meta()?.ok_or(VaultError::NotSetUp)?;
+        let mut local = Self::open_with_phrase(&meta, phrase);
+        // A newer header waits: only it counts (this device's copy is
+        // behind), and only when it is whole at its version, so the server
+        // cannot pass an older one off as newer.
+        let staged = self.staged_header();
+        let (dek, account_key, format) = match &staged {
+            Some(header) => {
+                let (dek, account_key) = Self::open_with_phrase(&sync::meta_of(header), phrase)
+                    .filter(|(dek, _)| sync::header_is_sealed_by(dek, header))
+                    .ok_or(if local.is_some() {
+                        VaultError::StaleRecoveryPhrase
+                    } else {
+                        VaultError::WrongRecoveryPhrase
+                    })?;
+                (dek, account_key, header.format)
+            }
+            None => {
+                let (dek, account_key) = local.take().ok_or(VaultError::WrongRecoveryPhrase)?;
+                self.check_joined(&meta, &dek)?;
+                (dek, account_key, meta.version)
+            }
+        };
+        let account_key = match (format >= WITH_ACCOUNT_KEY, account_key) {
+            (false, _) => None,
+            (true, Some(key)) => {
+                self.keys
+                    .put(KeyItem::SecretKey, key.as_bytes())
+                    .map_err(VaultError::Keychain)?;
+                Some(key)
+            }
+            (true, None) => Some(
+                self.stored_account_key()
+                    .ok_or(VaultError::SecretKeyNeeded)?,
+            ),
+        };
+        if let Some(header) = &staged {
+            // Changes made here under the old key follow when it is known.
+            let old = local.as_ref().map(|(old, _)| old);
+            self.promote_staged(header, old.map(|old| (old, &dek)))?;
+        }
+        if self.sync_state()?.is_none() {
+            // This device holds every entry: a new data key too, so an old
+            // copy of the database and the old password open nothing new.
+            return self.rekey(
+                &dek,
+                new_password,
+                account_key.as_ref(),
+                Some(phrase),
+                generation,
+            );
+        }
+        // Syncing, the data key stays: a device that just joined holds only
+        // the server's records, under that key, and cannot encrypt them
+        // again. The secret key still guards an old copy.
+        let meta = self.new_meta(new_password, &dek, account_key.as_ref(), Some(phrase))?;
+        self.save_header(&meta, &[], &dek)?;
+        // Locked meanwhile: the password changed all the same.
+        let _ = self.open_session(dek, now_ms(), generation);
+        Ok(())
     }
 
     /// Unlocks with `dek` unless the vault was locked since `generation`.
@@ -177,17 +444,50 @@ impl VaultService {
     /// counts (recorded before the slow check, so quitting mid-check does
     /// not skip it) until one succeeds.
     fn verify(&self, password: &str, now: u64) -> Result<(MetaRow, SecretKey), VaultError> {
+        self.verify_with(password, now, None)
+    }
+
+    /// [`Self::verify`] with the secret key given (else this device's).
+    fn verify_with(
+        &self,
+        password: &str,
+        now: u64,
+        account_key: Option<&AccountKey>,
+    ) -> Result<(MetaRow, SecretKey), VaultError> {
         let mut meta = self.meta()?.ok_or(VaultError::NotSetUp)?;
         if now < meta.locked_until_ms {
             return Err(VaultError::TooManyAttempts {
                 wait_ms: meta.locked_until_ms - now,
             });
         }
+        let stored;
+        let account_key = match (meta.version >= WITH_ACCOUNT_KEY, account_key) {
+            (false, _) => None,
+            (true, Some(key)) => Some(key),
+            (true, None) => {
+                stored = self
+                    .stored_account_key()
+                    .ok_or(VaultError::SecretKeyNeeded)?;
+                Some(&stored)
+            }
+        };
         let tries = meta.failed_tries.saturating_add(1);
         self.db
             .with_conn(|c| store::set_failures(c, tries, now + backoff_ms(tries)))?;
-        let kek = derive_key(password, &meta.salt, meta.params)?;
+        // A newer header from another device's password change: it becomes
+        // the vault's once the password opens it (changes made here under
+        // the old key and not uploaded cannot follow without that key).
+        if let Some(staged) = self.staged_header()
+            && let Some(dek) = self.open_staged(&staged, password)
+        {
+            self.promote_staged(&staged, None)?;
+            let meta = self.meta()?.ok_or(VaultError::NotSetUp)?;
+            return Ok((meta, dek));
+        }
+        let secret = account_key.map(|k| &k.as_bytes()[..]);
+        let kek = derive_key_keyed(password, &meta.salt, meta.params, secret)?;
         let dek = unwrap_key(&kek, &meta.wrapped_dek).map_err(|_| VaultError::WrongPassword)?;
+        self.check_joined(&meta, &dek)?;
         meta.failed_tries = 0;
         meta.locked_until_ms = 0;
         if meta.key_check.is_empty() {
@@ -202,6 +502,94 @@ impl VaultService {
         let generation = self.generation();
         let (_, dek) = self.verify(password, now)?;
         self.open_session(dek, now, generation)
+    }
+
+    /// Unlocks with the master password and the secret key as the user typed
+    /// it (a device that does not have it yet); keeps the key on this device.
+    pub fn unlock_with_account_key(
+        &self,
+        password: &str,
+        account_key: &str,
+        now: u64,
+    ) -> Result<(), VaultError> {
+        let key = AccountKey::parse(account_key).ok_or(VaultError::InvalidSecretKey)?;
+        let generation = self.generation();
+        let (_, dek) = self.verify_with(password, now, Some(&key))?;
+        self.keys
+            .put(KeyItem::SecretKey, key.as_bytes())
+            .map_err(VaultError::Keychain)?;
+        self.open_session(dek, now, generation)
+    }
+
+    /// Whether the vault is keyed by the secret key too (sync was set up).
+    pub fn uses_account_key(&self) -> bool {
+        self.meta()
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.version >= WITH_ACCOUNT_KEY)
+    }
+
+    /// Whether unlocking needs a secret key this device does not have.
+    pub fn needs_account_key(&self) -> bool {
+        self.meta()
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.version >= WITH_ACCOUNT_KEY)
+            && self.stored_account_key().is_none()
+    }
+
+    fn stored_account_key(&self) -> Option<AccountKey> {
+        self.keys
+            .get(KeyItem::SecretKey)
+            .and_then(|bytes| AccountKey::from_slice(&bytes))
+    }
+
+    /// Turns on the secret key: the data key is wrapped again with the
+    /// master password and `account_key`, and kept on this device. Entries
+    /// from before get revisions, so they can sync.
+    pub fn enable_account_key(
+        &self,
+        password: &str,
+        account_key: &AccountKey,
+    ) -> Result<(), VaultError> {
+        let generation = self.generation();
+        let (meta, old_dek) = self.verify(password, now_ms())?;
+        if meta.version >= WITH_ACCOUNT_KEY {
+            return Err(VaultError::AlreadySetUp);
+        }
+        self.keys
+            .put(KeyItem::SecretKey, account_key.as_bytes())
+            .map_err(VaultError::Keychain)?;
+        // A new data key: copies of the vault from before (backups, freed
+        // pages) hold the old one wrapped by the password alone, and must
+        // open nothing that syncs. The recovery phrase now wraps the secret
+        // key too.
+        let phrase = Self::phrase_of(&meta, &old_dek);
+        self.rekey(
+            &old_dek,
+            password,
+            Some(account_key),
+            phrase.as_ref(),
+            generation,
+        )
+    }
+
+    /// The secret key of this device, as written, after the master password.
+    pub fn reveal_account_key(
+        &self,
+        password: &str,
+    ) -> Result<zeroize::Zeroizing<String>, VaultError> {
+        self.verify(password, now_ms())?;
+        self.stored_account_key()
+            .map(|k| k.encode())
+            .ok_or(VaultError::SecretKeyNeeded)
+    }
+
+    /// Deletes the keys this device keeps for the vault.
+    fn forget_device_keys(&self) {
+        for item in [KeyItem::DataKey, KeyItem::SecretKey, KeyItem::DeviceToken] {
+            self.keys.delete(item);
+        }
     }
 
     pub fn lock(&self) {
@@ -253,23 +641,91 @@ impl VaultService {
         Self::decrypt(key, &row)
     }
 
+    /// The entry a row seals; [`VaultError::NotFound`] for a deletion marker.
     fn decrypt(key: &SecretKey, row: &EntryRow) -> Result<VaultEntry, VaultError> {
-        let sealed =
-            Sealed::from_parts(&row.nonce, &row.ciphertext).map_err(|_| VaultError::Corrupt)?;
-        let plain = open(key, &sealed, row.id.as_bytes()).map_err(|_| VaultError::Corrupt)?;
-        serde_json::from_slice(&plain).map_err(|_| VaultError::Corrupt)
+        Self::decrypt_row(key, row)?.ok_or(VaultError::NotFound)
     }
 
-    fn encrypt(key: &SecretKey, id: &str, entry: &VaultEntry) -> Result<EntryRow, VaultError> {
-        let json =
-            zeroize::Zeroizing::new(serde_json::to_vec(entry).map_err(|_| VaultError::Crypto)?);
-        let sealed = seal(key, &json, id.as_bytes())?;
+    /// What a row seals: an entry, or `None` for a deletion marker. Fails
+    /// unless it is authentic for its id and revision.
+    pub(crate) fn decrypt_row(
+        key: &SecretKey,
+        row: &EntryRow,
+    ) -> Result<Option<VaultEntry>, VaultError> {
+        let sealed =
+            Sealed::from_parts(&row.nonce, &row.ciphertext).map_err(|_| VaultError::Corrupt)?;
+        let plain =
+            open(key, &sealed, &aad(&row.id, row.revision)).map_err(|_| VaultError::Corrupt)?;
+        if row.deleted {
+            return if plain.as_slice() == DELETED {
+                Ok(None)
+            } else {
+                Err(VaultError::Corrupt)
+            };
+        }
+        serde_json::from_slice(&plain)
+            .map(Some)
+            .map_err(|_| VaultError::Corrupt)
+    }
+
+    /// A row sealing `entry` (`None`: a deletion marker) as `id` at
+    /// `revision`, to upload.
+    pub(crate) fn encrypt(
+        key: &SecretKey,
+        id: &str,
+        revision: u64,
+        entry: Option<&VaultEntry>,
+    ) -> Result<EntryRow, VaultError> {
+        let plain = match entry {
+            Some(entry) => {
+                zeroize::Zeroizing::new(serde_json::to_vec(entry).map_err(|_| VaultError::Crypto)?)
+            }
+            None => zeroize::Zeroizing::new(DELETED.to_vec()),
+        };
+        let sealed = seal(key, &plain, &aad(id, revision))?;
         Ok(EntryRow {
             id: id.to_owned(),
             nonce: sealed.nonce.to_vec(),
             ciphertext: sealed.ciphertext,
-            updated_at: entry.updated_at.clone(),
+            updated_at: entry
+                .map(|e| e.updated_at.clone())
+                .unwrap_or_else(timestamp),
+            revision,
+            deleted: entry.is_none(),
+            dirty: true,
+            synced_revision: 0,
         })
+    }
+
+    /// `row` decrypted with `old` and sealed again with `new` at `revision`,
+    /// still to upload, keeping what the server last had.
+    fn reseal(
+        &self,
+        old: &SecretKey,
+        new: &SecretKey,
+        row: &EntryRow,
+        revision: u64,
+    ) -> Result<EntryRow, VaultError> {
+        let entry = Self::decrypt_row(old, row)?;
+        let mut sealed = Self::encrypt(new, &row.id, revision, entry.as_ref())?;
+        sealed.synced_revision = row.synced_revision;
+        sealed.updated_at = row.updated_at.clone();
+        Ok(sealed)
+    }
+
+    /// The row of `id` sealing `entry` (`None`: deleted) at its next
+    /// revision.
+    fn next_row(
+        &self,
+        key: &SecretKey,
+        id: &str,
+        entry: Option<&VaultEntry>,
+    ) -> Result<EntryRow, VaultError> {
+        let current = self.db.with_conn(|c| store::load_entry(c, id))?;
+        let revision = current.as_ref().map_or(0, |r| r.revision) + 1;
+        let mut row = Self::encrypt(key, id, revision, entry)?;
+        row.synced_revision = current.map_or(0, |r| r.synced_revision);
+        Ok(row)
     }
 
     /// Every entry's summary, sorted by title.
@@ -278,6 +734,7 @@ impl VaultService {
             let rows = self.db.with_conn(store::load_entries)?;
             let mut list: Vec<EntrySummary> = rows
                 .iter()
+                .filter(|row| !row.deleted)
                 .map(|row| {
                     Self::decrypt(key, row)
                         .map_or_else(|_| EntrySummary::corrupt(&row.id), |e| e.summary(&row.id))
@@ -304,14 +761,18 @@ impl VaultService {
                 entry.created_at = now.clone();
             }
             entry.updated_at = now;
-            let row = Self::encrypt(key, &id, &entry)?;
+            let row = self.next_row(key, &id, Some(&entry))?;
             self.db.with_conn(|c| store::upsert_entry(c, &row))?;
             Ok(id)
         })
     }
 
+    /// Deletes entry `id`, leaving a deletion marker to sync.
     pub fn delete(&self, id: &str) -> Result<(), VaultError> {
-        self.with_key(|_| Ok(self.db.with_conn(|c| store::delete_entry(c, id))?))
+        self.with_key(|key| {
+            let row = self.next_row(key, id, None)?;
+            Ok(self.db.with_conn(|c| store::upsert_entry(c, &row))?)
+        })
     }
 
     /// The text of `field` of entry `id`, for the clipboard.
@@ -341,28 +802,17 @@ impl VaultService {
     pub fn change_password(&self, old: &str, new: &str) -> Result<(), VaultError> {
         check_strength(new)?;
         let generation = self.generation();
-        let (_, old_dek) = self.verify(old, now_ms())?;
-        let new_dek = SecretKey::random()?;
-        let rows = self
-            .db
-            .with_conn(store::load_entries)?
-            .into_iter()
-            .map(|row| match Self::decrypt(&old_dek, &row) {
-                Ok(entry) => Self::encrypt(&new_dek, &row.id, &entry),
-                // A corrupt entry stays as it was.
-                Err(_) => Ok(row),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let meta = self.new_meta(new, &new_dek)?;
-        self.db
-            .with_conn(|c| store::save_meta_and_entries(c, &meta, &rows))?;
-        // A Touch ID copy follows the new key, or goes.
-        if self.keys.has_key() && self.keys.save(&new_dek).is_err() {
-            self.keys.delete();
-        }
-        // Locked meanwhile: the password changed all the same.
-        let _ = self.open_session(new_dek, now_ms(), generation);
-        Ok(())
+        let (meta, old_dek) = self.verify(old, now_ms())?;
+        let account_key = self.account_key_for(&meta)?;
+        // The recovery phrase stays: it wraps the new data key.
+        let phrase = Self::phrase_of(&meta, &old_dek);
+        self.rekey(
+            &old_dek,
+            new,
+            account_key.as_ref(),
+            phrase.as_ref(),
+            generation,
+        )
     }
 
     /// Every entry, encrypted with `backup_password`; needs the master
@@ -373,6 +823,7 @@ impl VaultService {
         let rows = self.db.with_conn(store::load_entries)?;
         let entries = rows
             .iter()
+            .filter(|row| !row.deleted)
             .map(|row| {
                 let entry = Self::decrypt(&dek, row)?;
                 Ok(backup::BackupEntry {
@@ -406,19 +857,32 @@ impl VaultService {
             self.db.with_conn(|c| {
                 let tx = c.unchecked_transaction()?;
                 let existing = store::load_entries(&tx)?;
+                let current = |id: &str| existing.iter().find(|r| r.id == id);
                 let rows: Vec<EntryRow> = entries
                     .iter()
                     .filter(|b| match mode {
                         ImportMode::Replace => true,
-                        ImportMode::Merge => existing
-                            .iter()
-                            .find(|r| r.id == b.id)
-                            .is_none_or(|r| r.updated_at < b.entry.updated_at),
+                        ImportMode::Merge => current(&b.id)
+                            .is_none_or(|r| r.deleted || r.updated_at < b.entry.updated_at),
                     })
-                    .map(|b| Self::encrypt(key, &b.id, &b.entry))
+                    .map(|b| {
+                        let base = current(&b.id);
+                        let revision = base.map_or(0, |r| r.revision) + 1;
+                        let mut row = Self::encrypt(key, &b.id, revision, Some(&b.entry))?;
+                        row.synced_revision = base.map_or(0, |r| r.synced_revision);
+                        Ok::<_, VaultError>(row)
+                    })
                     .collect::<Result<_, _>>()?;
                 if mode == ImportMode::Replace {
-                    tx.execute("DELETE FROM vault_entries", [])?;
+                    // Entries not in the backup leave deletion markers to sync.
+                    for gone in existing
+                        .iter()
+                        .filter(|r| !r.deleted && !entries.iter().any(|b| b.id == r.id))
+                    {
+                        let mut marker = Self::encrypt(key, &gone.id, gone.revision + 1, None)?;
+                        marker.synced_revision = gone.synced_revision;
+                        store::upsert_entry(&tx, &marker)?;
+                    }
                 }
                 for row in &rows {
                     store::upsert_entry(&tx, row)?;
@@ -436,11 +900,13 @@ impl VaultService {
     /// Keeps a copy of the data key for Touch ID; needs the password.
     pub fn enable_touch_id(&self, password: &str) -> Result<(), VaultError> {
         let (_, dek) = self.verify(password, now_ms())?;
-        self.keys.save(&dek).map_err(VaultError::Keychain)
+        self.keys
+            .put(KeyItem::DataKey, dek.as_bytes())
+            .map_err(VaultError::Keychain)
     }
 
     pub fn disable_touch_id(&self) {
-        self.keys.delete();
+        self.keys.delete(KeyItem::DataKey);
     }
 
     /// Unlocks with the stored key after the system asks the user; only
@@ -451,7 +917,12 @@ impl VaultService {
         if meta.key_check.is_empty() {
             return Err(VaultError::Keychain("请先用主密码解锁一次".into()));
         }
-        let dek = self.keys.load(reason).map_err(VaultError::Keychain)?;
+        let bytes = self
+            .keys
+            .get_with_auth(KeyItem::DataKey, reason)
+            .map_err(VaultError::Keychain)?;
+        let dek = SecretKey::from_slice(&bytes)
+            .map_err(|_| VaultError::Keychain("Touch ID 密钥已失效，请用主密码解锁".into()))?;
         if !matches_check(&dek, &meta.key_check) {
             return Err(VaultError::Keychain(
                 "Touch ID 密钥已失效，请用主密码解锁".into(),
@@ -463,7 +934,7 @@ impl VaultService {
     /// Deletes the vault and its Touch ID key.
     pub fn reset(&self) -> Result<(), VaultError> {
         self.lock();
-        self.keys.delete();
+        self.forget_device_keys();
         Ok(self.db.with_conn(store::wipe)?)
     }
 }
@@ -631,6 +1102,153 @@ mod tests {
         );
         v.unlock("new pass phrase", 0).unwrap();
         assert_eq!(v.get(&id).unwrap().password, "pw");
+    }
+
+    const PW: &str = "correct horse battery";
+    const NEW_PW: &str = "brand new pass phrase";
+
+    #[test]
+    fn a_forgotten_password_is_reset_with_the_recovery_phrase() {
+        let v = service();
+        let phrase = RecoveryKey::generate().unwrap();
+        v.setup_with_recovery(PW, &phrase).unwrap();
+        assert!(v.has_recovery_phrase());
+        let id = v.save(None, entry("a", "pw")).unwrap();
+        v.lock();
+        let typed = phrase.words().concat();
+        let parsed = RecoveryKey::parse(&typed).unwrap();
+        assert_eq!(
+            v.recover(&parsed, "short").unwrap_err(),
+            VaultError::WeakPassword
+        );
+        v.recover(&parsed, NEW_PW).unwrap();
+        assert_eq!(v.status(), VaultStatus::Unlocked);
+        assert_eq!(v.get(&id).unwrap().password, "pw");
+        v.lock();
+        assert_eq!(v.unlock(PW, 0).unwrap_err(), VaultError::WrongPassword);
+        v.unlock(NEW_PW, 0).unwrap();
+        // The phrase stays the vault's.
+        v.lock();
+        v.recover(&phrase, PW).unwrap();
+        v.lock();
+        v.unlock(PW, 0).unwrap();
+    }
+
+    #[test]
+    fn another_phrase_or_none_recovers_nothing() {
+        let v = service();
+        v.setup(PW).unwrap();
+        assert!(!v.has_recovery_phrase());
+        let phrase = RecoveryKey::generate().unwrap();
+        assert_eq!(
+            v.recover(&phrase, NEW_PW).unwrap_err(),
+            VaultError::WrongRecoveryPhrase
+        );
+        v.set_recovery_phrase(PW, &phrase).unwrap();
+        let other = RecoveryKey::generate().unwrap();
+        assert_eq!(
+            v.recover(&other, NEW_PW).unwrap_err(),
+            VaultError::WrongRecoveryPhrase
+        );
+        v.lock();
+        v.unlock(PW, 0).unwrap();
+    }
+
+    #[test]
+    fn recovering_without_sync_changes_the_data_key() {
+        let v = service();
+        let phrase = RecoveryKey::generate().unwrap();
+        v.setup_with_recovery(PW, &phrase).unwrap();
+        let id = v.save(None, entry("a", "pw")).unwrap();
+        let before = v.meta().unwrap().unwrap();
+        v.lock();
+        v.recover(&phrase, NEW_PW).unwrap();
+        let after = v.meta().unwrap().unwrap();
+        // Another key: the old password with an old copy opens nothing new.
+        assert_ne!(before.key_check, after.key_check);
+        assert_eq!(v.get(&id).unwrap().password, "pw");
+    }
+
+    #[test]
+    fn the_phrase_survives_a_password_change() {
+        let v = service();
+        let phrase = RecoveryKey::generate().unwrap();
+        v.setup_with_recovery(PW, &phrase).unwrap();
+        v.change_password(PW, NEW_PW).unwrap();
+        assert!(v.has_recovery_phrase());
+        v.lock();
+        v.recover(&phrase, "third pass phrase").unwrap();
+        v.lock();
+        v.unlock("third pass phrase", 0).unwrap();
+    }
+
+    #[test]
+    fn a_phrase_added_later_keeps_the_key_a_new_one_replaces_it() {
+        let v = service();
+        v.setup(PW).unwrap();
+        let id = v.save(None, entry("a", "pw")).unwrap();
+        let first = RecoveryKey::generate().unwrap();
+        assert_eq!(
+            v.set_recovery_phrase("wrong password!", &first)
+                .unwrap_err(),
+            VaultError::WrongPassword
+        );
+        let before = v.meta().unwrap().unwrap();
+        v.set_recovery_phrase(PW, &first).unwrap();
+        let after = v.meta().unwrap().unwrap();
+        assert_eq!(before.wrapped_dek, after.wrapped_dek);
+
+        let second = RecoveryKey::generate().unwrap();
+        v.set_recovery_phrase(PW, &second).unwrap();
+        let replaced = v.meta().unwrap().unwrap();
+        assert_ne!(after.wrapped_dek, replaced.wrapped_dek);
+        v.lock();
+        assert_eq!(
+            v.recover(&first, NEW_PW).unwrap_err(),
+            VaultError::WrongRecoveryPhrase
+        );
+        v.recover(&second, NEW_PW).unwrap();
+        assert_eq!(v.get(&id).unwrap().password, "pw");
+    }
+
+    #[test]
+    fn the_phrase_is_never_stored_in_the_clear() {
+        let v = service();
+        let phrase = RecoveryKey::generate().unwrap();
+        v.setup_with_recovery(PW, &phrase).unwrap();
+        let raw = format!("{:?}", v.meta().unwrap().unwrap());
+        let words = phrase.words().concat();
+        assert!(!raw.contains(&words));
+        let meta = v.meta().unwrap().unwrap();
+        let bytes = RecoveryKey::parse(&words).unwrap();
+        for blob in [&meta.recovery_wrap, &meta.recovery_sealed] {
+            assert!(
+                !blob
+                    .windows(32)
+                    .any(|w| RecoveryKey::parse_bytes(w).as_ref() == Some(&bytes))
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_restores_the_secret_key_on_a_device_without_it() {
+        let v = service();
+        let phrase = RecoveryKey::generate().unwrap();
+        v.setup_with_recovery(PW, &phrase).unwrap();
+        let account_key = AccountKey::generate().unwrap();
+        v.enable_account_key(PW, &account_key).unwrap();
+        v.lock();
+        // As on a device that never had the secret key.
+        v.keys.delete(KeyItem::SecretKey);
+        assert!(v.needs_account_key());
+        v.recover(&phrase, NEW_PW).unwrap();
+        assert!(!v.needs_account_key());
+        assert_eq!(
+            v.stored_account_key().unwrap().as_bytes(),
+            account_key.as_bytes()
+        );
+        v.lock();
+        v.unlock(NEW_PW, 0).unwrap();
     }
 
     #[test]
@@ -814,7 +1432,8 @@ mod tests {
             .unwrap();
 
         // The old password and an old copy of the metadata open nothing now.
-        let old_kek = derive_key("correct horse battery", &old_meta.salt, old_meta.params).unwrap();
+        let old_kek =
+            crypto::derive_key("correct horse battery", &old_meta.salt, old_meta.params).unwrap();
         let old_dek = unwrap_key(&old_kek, &old_meta.wrapped_dek).unwrap();
         let row =
             v.db.with_conn(|c| store::load_entry(c, &id))
@@ -833,10 +1452,35 @@ mod tests {
     }
 
     #[test]
+    fn enabling_the_secret_key_rotates_the_data_key() {
+        let v = service();
+        v.setup("correct horse battery").unwrap();
+        let id = v.save(None, entry("a", "pw")).unwrap();
+        let old_meta = v.db.with_conn(store::load_meta).unwrap().unwrap();
+        v.enable_account_key("correct horse battery", &AccountKey::generate().unwrap())
+            .unwrap();
+        // A copy of the vault from before (password only) opens nothing now.
+        let old_kek =
+            crypto::derive_key("correct horse battery", &old_meta.salt, old_meta.params).unwrap();
+        let old_dek = unwrap_key(&old_kek, &old_meta.wrapped_dek).unwrap();
+        let row =
+            v.db.with_conn(|c| store::load_entry(c, &id))
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            VaultService::decrypt(&old_dek, &row).unwrap_err(),
+            VaultError::Corrupt
+        );
+        assert_eq!(v.get(&id).unwrap().password, "pw");
+    }
+
+    #[test]
     fn touch_id_refuses_another_vaults_key_even_when_empty() {
         let v = service();
         v.setup("correct horse battery").unwrap();
-        v.keys.save(&SecretKey::random().unwrap()).unwrap();
+        v.keys
+            .put(KeyItem::DataKey, SecretKey::random().unwrap().as_bytes())
+            .unwrap();
         v.lock();
         assert!(matches!(
             v.unlock_with_touch_id("test").unwrap_err(),

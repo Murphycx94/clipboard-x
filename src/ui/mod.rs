@@ -24,6 +24,7 @@ pub use state::{AppState, Page};
 pub fn App() -> impl IntoElement {
     let state = AppState::new();
     services().start_capture();
+    services().start_sync_worker();
     state.reload();
     state.apply_theme();
     state.watch_services();

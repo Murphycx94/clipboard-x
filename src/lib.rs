@@ -8,6 +8,7 @@
 //! - `ui`: the NSH components; [`App`] is the root (`nsh.json` `"root"`).
 
 pub mod capture;
+pub mod cloud;
 pub mod db;
 pub mod hotkey;
 pub mod logger;

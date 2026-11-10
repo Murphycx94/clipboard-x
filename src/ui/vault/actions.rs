@@ -26,6 +26,7 @@ impl AppState {
         let vault = services().vault();
         let status = vault.status();
         self.vault_status.set(status);
+        self.refresh_sync();
         if status != VaultStatus::Unlocked {
             self.vault_items.set(Vec::new());
             if self.dialog.get().is_some_and(DialogKind::is_vault) {
@@ -54,6 +55,23 @@ impl AppState {
         if vault.status() != untracked(move || self.vault_status.get()) {
             self.refresh_vault();
         }
+        // Another device changed the master password: ask once.
+        let staged = vault.has_staged_header();
+        let prompted = untracked(move || self.sync_prompted.get());
+        if staged
+            && !prompted
+            && vault.status() == VaultStatus::Unlocked
+            && untracked(move || self.dialog.get()).is_none()
+        {
+            self.sync_prompted.set(true);
+            self.dialog.set(Some(DialogKind::SyncNewPassword));
+        } else if !staged && prompted {
+            self.sync_prompted.set(false);
+        }
+        let sync = services().sync_status();
+        if untracked(move || self.sync_status.get()) != sync {
+            self.sync_status.set(sync);
+        }
         let second = now_ms() / 1000;
         if untracked(move || self.vault_tick.get()) != second {
             self.vault_tick.set(second);
@@ -74,7 +92,7 @@ impl AppState {
 
     /// Runs slow vault `work` on a blocking thread, then `done` with its
     /// result here; reports errors and refreshes the vault after.
-    fn run_vault<T: Send + 'static>(
+    pub(super) fn run_vault<T: Send + 'static>(
         self,
         work: impl FnOnce() -> Result<T, VaultError> + Send + 'static,
         done: impl FnOnce(T) + 'static,
@@ -96,30 +114,26 @@ impl AppState {
         });
     }
 
-    pub fn vault_setup(self, password: String, confirm: String) {
-        if password != confirm {
-            self.error("两次输入的密码不一致");
-            return;
-        }
+    /// Unlocks with the master password, and the secret key when this
+    /// device does not have it yet.
+    pub fn vault_unlock(self, password: String, account_key: Option<String>) {
         let password = Zeroizing::new(password);
+        let account_key = account_key.map(Zeroizing::new);
         self.run_vault(
-            move || services().vault().setup(&password),
-            move |()| self.success("密码本已创建"),
-        );
-    }
-
-    pub fn vault_unlock(self, password: String) {
-        let password = Zeroizing::new(password);
-        self.run_vault(
-            move || services().vault().unlock(&password, now_ms()),
-            |()| {},
+            move || match &account_key {
+                Some(key) => services()
+                    .vault()
+                    .unlock_with_account_key(&password, key, now_ms()),
+                None => services().vault().unlock(&password, now_ms()),
+            },
+            |()| services().sync_now(),
         );
     }
 
     pub fn vault_unlock_touch_id(self) {
         self.run_vault(
             || services().vault().unlock_with_touch_id(TOUCH_ID_REASON),
-            |()| {},
+            |()| services().sync_now(),
         );
     }
 
@@ -161,6 +175,7 @@ impl AppState {
             Ok(_) => {
                 self.dialog.set(None);
                 self.refresh_vault();
+                services().sync_now();
                 self.success("已保存");
             }
             Err(e) => self.error(e.to_string()),
@@ -180,6 +195,7 @@ impl AppState {
         {
             self.dialog.set(None);
             self.refresh_vault();
+            services().sync_now();
             self.success("已删除");
         }
     }
@@ -282,6 +298,7 @@ impl AppState {
             move || services().vault().change_password(&old, &new),
             move |()| {
                 self.dialog.set(None);
+                services().sync_now();
                 self.success("主密码已修改");
             },
         );
@@ -361,6 +378,7 @@ impl AppState {
             move |count| {
                 self.vault_import_text.set(String::new());
                 self.dialog.set(None);
+                services().sync_now();
                 self.success(format!("已导入 {count} 条"));
             },
         );

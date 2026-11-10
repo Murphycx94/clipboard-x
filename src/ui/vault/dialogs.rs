@@ -24,6 +24,13 @@ pub fn vault_dialogs(state: AppState) -> impl IntoElement {
         .child(when(is(DialogKind::VaultPassword), move || {
             password_dialog(state)
         }))
+        .child(when(is(DialogKind::VaultRecoveryPhrase), move || {
+            super::recovery::phrase_dialog(state)
+        }))
+        .child(when(is(DialogKind::VaultRecover), move || {
+            super::recovery::recover_dialog(state)
+        }))
+        .child(super::cloud::sync_dialogs(state))
         .child(when(is(DialogKind::VaultReset), move || {
             reset_dialog(state)
         }))
@@ -78,6 +85,7 @@ fn password_dialog(state: AppState) -> impl IntoElement {
             VaultPurpose::ChangePassword => state.vault_change_password(a, b, c),
             VaultPurpose::Export => state.vault_export(a, b, c),
             VaultPurpose::Import => state.vault_import(a, mode.get()),
+            VaultPurpose::RevealSecretKey => state.sync_reveal_secret(a),
         }
     };
     let (title, note, confirm) = match purpose {
@@ -93,15 +101,22 @@ fn password_dialog(state: AppState) -> impl IntoElement {
             "导出",
         ),
         VaultPurpose::Import => ("导入备份", "输入导出时设置的备份密码。", "导入"),
+        VaultPurpose::RevealSecretKey => (
+            "查看秘密密钥",
+            "输入主密码以显示本机保存的秘密密钥。",
+            "显示",
+        ),
     };
     let fields = view()
         .gap(px(8.0))
         .child(text(note).text_xs().text_color(muted))
         .child(match purpose {
-            VaultPurpose::EnableTouchId => secret_field(first, "vault-dialog-1", "主密码")
-                .on_submit(move |_: &str| submit())
-                .auto_focus(true)
-                .into_element(),
+            VaultPurpose::EnableTouchId | VaultPurpose::RevealSecretKey => {
+                secret_field(first, "vault-dialog-1", "主密码")
+                    .on_submit(move |_: &str| submit())
+                    .auto_focus(true)
+                    .into_element()
+            }
             VaultPurpose::ChangePassword => view()
                 .gap(px(8.0))
                 .child(secret_field(first, "vault-dialog-1", "当前主密码").auto_focus(true))

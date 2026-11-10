@@ -90,6 +90,7 @@ pub fn settings_page(state: AppState) -> impl IntoElement {
                 ],
             ))
             .child(vault_section(state))
+            .child(super::vault::cloud_section(state))
             .child(section(
                 "关于",
                 vec![
@@ -173,6 +174,27 @@ fn vault_section(state: AppState) -> impl IntoElement {
                 }),
             )
             .into_element(),
+            dynamic(move || {
+                // Read again when a dialog closes (one may have set it).
+                let _ = state.dialog.get();
+                let has = services().vault().has_recovery_phrase();
+                row(
+                    Icon::Shield,
+                    "恢复助记词",
+                    if has {
+                        "已设置：忘记主密码时可用它重置"
+                    } else {
+                        "未设置：忘记主密码将无法找回密码本"
+                    },
+                    text_button(
+                        if has { "重新生成" } else { "生成" },
+                        Tone::Plain,
+                        move || state.dialog.set(Some(DialogKind::VaultRecoveryPhrase)),
+                    ),
+                )
+                .into_element()
+            })
+            .into_element(),
             row(
                 Icon::Archive,
                 "加密备份",
@@ -223,7 +245,7 @@ fn vault_section(state: AppState) -> impl IntoElement {
 }
 
 /// A titled group of rows on a card.
-fn section(title: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
+pub(super) fn section(title: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
     let count = rows.len();
     view()
         .gap(px(6.0))
@@ -258,7 +280,7 @@ fn section(title: &'static str, rows: Vec<AnyElement>) -> impl IntoElement {
 }
 
 /// An icon, a title over a description, and a control on the right.
-fn row(
+pub(super) fn row(
     glyph: Icon,
     title: &'static str,
     description: &'static str,
