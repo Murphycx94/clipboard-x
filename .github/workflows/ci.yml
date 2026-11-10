@@ -35,13 +35,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
 
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Includes the headless UI tests; they keep off the clipboard and the
-      # keychain by themselves.
-      - run: cargo test
+      # The app, the sync server and the protocol; includes the headless UI
+      # tests and the end-to-end sync tests against a local server. They
+      # keep off the clipboard and the keychain by themselves.
+      - run: cargo test --workspace
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   version:
     name: version
@@ -94,10 +107,13 @@ jobs:
       - name: Build the universal app and disk image
         run: scripts/bundle-macos.sh --universal --dmg
 
-      - name: Zip the app
+      - name: Zip the app, with checksums
         run: |
           ditto -c -k --keepParent dist/ClipboardX.app \
             "dist/ClipboardX-${{ needs.version.outputs.version }}-macos-universal.zip"
+          cd dist && for f in ClipboardX-*.dmg ClipboardX-*-macos-universal.zip; do
+            shasum -a 256 "$f" > "$f.sha256"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -105,11 +121,52 @@ jobs:
           path: |
             dist/ClipboardX-*.dmg
             dist/ClipboardX-*-macos-universal.zip
+            dist/ClipboardX-*.sha256
+          if-no-files-found: error
+
+  server:
+    name: package sync server (Linux)
+    needs: [check, version]
+    runs-on: ubuntu-latest
+    env:
+      NAME: clipboardx-sync-server-${{ needs.version.outputs.version }}-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server-musl
+
+      # Static: runs in any LXC whatever its C library.
+      - name: Build
+        run: cargo build --release -p clipboardx-sync-server --target x86_64-unknown-linux-musl
+
+      - name: Package with the deploy kit
+        run: |
+          mkdir -p "dist/$NAME"
+          cp target/x86_64-unknown-linux-musl/release/clipboardx-sync-server "dist/$NAME/"
+          cp server/deploy/install.sh server/deploy/clipboardx-sync.service \
+            server/deploy/clipboardx-sync.env.example server/deploy/README.md "dist/$NAME/"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipboardx-sync-server-linux
+          path: |
+            dist/${{ env.NAME }}.tar.gz
+            dist/${{ env.NAME }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
     name: release
-    needs: [version, package]
+    needs: [version, package, server]
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -118,6 +175,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ClipboardX-${{ needs.version.outputs.version }}-macos
+          path: artifacts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: clipboardx-sync-server-linux
           path: artifacts
 
       - uses: softprops/action-gh-release@v2
@@ -133,6 +195,10 @@ jobs:
             应用未经 Apple 公证（ad-hoc 签名），首次打开时系统可能提示"无法验证开发者"或"已损坏"：
             在"访达"中按住 Control 点按应用并选择"打开"，或在终端运行
             `xattr -dr com.apple.quarantine /Applications/ClipboardX.app`。
+
+            `clipboardx-sync-server-…-linux-x86_64.tar.gz` 是密码本云同步的服务端（静态编译），部署说明见压缩包内的 README.md。
           files: |
             artifacts/ClipboardX-*.dmg
             artifacts/ClipboardX-*-macos-universal.zip
+            artifacts/clipboardx-sync-server-*-linux-x86_64.tar.gz
+            artifacts/*.sha256

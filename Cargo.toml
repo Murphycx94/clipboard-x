@@ -6,6 +6,7 @@ edition = "2024"
 publish = false
 
 [workspace]
+members = ["crates/sync-proto", "server"]
 
 [lib]
 path = "src/lib.rs"
@@ -40,6 +41,9 @@ zeroize = { version = "1.9.1", features = ["derive"] }
 totp-rs = { version = "6.0.0", features = ["otpauth"] }
 uuid = { version = "1.29.2", features = ["v4"] }
 getrandom = "0.4"
+clipboardx-sync-proto = { version = "0.1.0", path = "crates/sync-proto" }
+tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+bip39 = { version = "3.0.0", features = ["chinese-simplified", "zeroize"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
@@ -58,9 +62,11 @@ nsh-platform-linux = { version = "0.4.0", default-features = false }
 nsh-platform-windows = { version = "0.4.0", default-features = false }
 
 [dev-dependencies]
+clipboardx-sync-server = { path = "server" }
 nsh-engine = "0.4.0"
 nsh-testing = "0.4.0"
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros"] }
 
 # Key derivation is unusably slow unoptimized; keep debug builds and tests quick.
 [profile.dev.package.argon2]

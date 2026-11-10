@@ -1,0 +1,47 @@
+[Unit]
+Description=ClipboardX sync server (ciphertext only)
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+EnvironmentFile=/etc/clipboardx-sync.env
+Environment=CLIPBOARDX_SYNC_DATA=/var/lib/clipboardx-sync
+ExecStart=/usr/local/bin/clipboardx-sync-server
+User=clipboardx-sync
+Group=clipboardx-sync
+StateDirectory=clipboardx-sync
+StateDirectoryMode=0700
+# The Tailscale address may come up after this service: retry.
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictSUIDSGID=true
+RestrictRealtime=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+UMask=0077
+# Only the tailnet (and this machine) may talk to it.
+IPAddressDeny=any
+IPAddressAllow=100.64.0.0/10 fd7a:115c:a1e0::/48 localhost
+
+[Install]
+WantedBy=multi-user.target

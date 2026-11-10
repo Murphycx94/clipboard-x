@@ -40,6 +40,7 @@ pub struct Services {
     stop_capture: Arc<AtomicBool>,
     host: OnceLock<Box<dyn WindowHost>>,
     vault: VaultService,
+    sync: crate::cloud::Worker,
 }
 
 static SERVICES: OnceLock<Services> = OnceLock::new();
@@ -120,6 +121,7 @@ impl Services {
             capture_started: AtomicBool::new(false),
             stop_capture: Arc::new(AtomicBool::new(false)),
             host: OnceLock::new(),
+            sync: crate::cloud::Worker::default(),
         }
     }
 
@@ -185,6 +187,22 @@ impl Services {
 
     pub fn vault(&self) -> &VaultService {
         &self.vault
+    }
+
+    /// Starts syncing the vault in the background (while it is unlocked and
+    /// sync is on); once.
+    pub fn start_sync_worker(&'static self) {
+        self.sync
+            .start(move || &self.vault, move || self.notify_changed());
+    }
+
+    /// Syncs the vault soon.
+    pub fn sync_now(&self) {
+        self.sync.sync_now();
+    }
+
+    pub fn sync_status(&self) -> crate::cloud::Status {
+        self.sync.status()
     }
 
     /// Copies a field of a vault entry as a secret: left out of clipboard

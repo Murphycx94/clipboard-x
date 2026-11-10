@@ -22,6 +22,7 @@ fn main() -> ExitCode {
     clipboardx::logger::init(&dir);
     log::info!("ClipboardX {} starting", env!("CARGO_PKG_VERSION"));
     services().start_capture();
+    services().start_sync_worker();
     run()
 }
 
