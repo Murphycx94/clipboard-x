@@ -44,6 +44,7 @@ mod key {
     pub const TELEGRAM_CHAT_ID: &str = "telegram_chat_id";
     pub const THEME: &str = "theme";
     pub const HIDE_ON_BLUR: &str = "hide_on_blur";
+    pub const THUMBNAIL_VERSION: &str = "thumbnail_version";
     pub const VAULT_LOCK_MINUTES: &str = "vault_lock_minutes";
     pub const VAULT_LOCK_ON_HIDE: &str = "vault_lock_on_hide";
     pub const VAULT_TOUCH_ID: &str = "vault_touch_id";
@@ -275,6 +276,48 @@ impl Database {
                 ContentType::Image => image.map(ItemContent::Image),
             }),
         )
+    }
+
+    /// The ids of every image item.
+    pub fn image_ids(&self) -> Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT id FROM clipboard_items WHERE content_type = 'image'")?;
+        let ids = stmt.query_map([], |r| r.get(0))?;
+        ids.collect()
+    }
+
+    /// The stored thumbnail (PNG) of item `id`.
+    pub fn thumbnail(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT image_thumbnail FROM clipboard_items WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_thumbnail(&self, id: i64, png: &[u8]) -> Result<()> {
+        self.conn().execute(
+            "UPDATE clipboard_items SET image_thumbnail = ?1 WHERE id = ?2",
+            params![png, id],
+        )?;
+        Ok(())
+    }
+
+    /// The way the stored thumbnails were made (1 before it was recorded).
+    pub fn thumbnail_version(&self) -> Result<i64> {
+        Ok(self
+            .setting(key::THUMBNAIL_VERSION)?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1))
+    }
+
+    pub fn set_thumbnail_version(&self, version: i64) -> Result<()> {
+        self.set_setting(key::THUMBNAIL_VERSION, &version.to_string())
     }
 
     /// Deletes every item that is not a favorite; how many went.
