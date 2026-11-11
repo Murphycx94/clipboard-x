@@ -7,7 +7,9 @@ use crate::model::mask_token;
 
 use super::icons::Icon;
 use super::state::{AppState, DialogKind};
-use super::widgets::{Tone, field, icon_button, modal, muted, success_color, text_button};
+use super::widgets::{
+    Tone, field, icon_button, modal, muted, submit_with_mod_enter, success_color, text_button,
+};
 
 pub fn dialogs(state: AppState) -> impl IntoElement {
     let is = move |kind: DialogKind| move || state.dialog.get() == Some(kind);
@@ -35,6 +37,8 @@ fn buttons(children: Vec<AnyElement>) -> impl IntoElement {
 }
 
 fn note_dialog(state: AppState) -> impl IntoElement {
+    // Enter is a new line here: ⌘↩ saves.
+    submit_with_mod_enter(move || state.save_note());
     let content = view()
         .child(
             field()
@@ -76,6 +80,12 @@ fn telegram_dialog(state: AppState) -> impl IntoElement {
         if token.trim().chars().count() > 8 {
             state.save_telegram_token(&token);
             token_draft.set(String::new());
+        }
+    };
+    let save_chat = move || {
+        let chat_id = chat_draft.get();
+        if !chat_id.trim().is_empty() {
+            state.save_telegram_chat_id(&chat_id);
         }
     };
     let label = |s: &'static str| {
@@ -141,14 +151,10 @@ fn telegram_dialog(state: AppState) -> impl IntoElement {
                                 .flex_1()
                                 .value(move || chat_draft.get())
                                 .on_change(move |text: &str| chat_draft.set(text.to_owned()))
+                                .on_submit(move |_: &str| save_chat())
                                 .placeholder("输入 Chat ID"),
                         )
-                        .child(text_button("保存", Tone::Primary, move || {
-                            let chat_id = chat_draft.get();
-                            if !chat_id.trim().is_empty() {
-                                state.save_telegram_chat_id(&chat_id);
-                            }
-                        })),
+                        .child(text_button("保存", Tone::Primary, save_chat)),
                 ),
         )
         .child(

@@ -51,6 +51,7 @@ pub fn App() -> impl IntoElement {
                 }))
                 .child(when(page_is(Page::Vault), move || vault::vault_page(state))),
         )
+        .child(keys::list_keys(state))
         .child(widgets::toast_layer(state))
         .child(dialogs::dialogs(state))
 }

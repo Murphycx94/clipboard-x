@@ -50,6 +50,7 @@ pub fn setup_view(state: AppState) -> impl IntoElement {
     let phrase = signal(None::<RecoveryKey>);
     let positions = signal(checked_positions());
     let typed = [(); CHECKED_WORDS].map(|()| signal(String::new()));
+    let confirm_field = element_ref();
     let next = move || {
         if password.with(|p| p.chars().count() < MIN_PASSWORD_CHARS) {
             return state.error(VaultError::WeakPassword.to_string());
@@ -97,12 +98,14 @@ pub fn setup_view(state: AppState) -> impl IntoElement {
                         .masked(true)
                         .value(move || password.get())
                         .on_change(move |t: &str| password.set(t.to_owned()))
+                        .on_submit(move |_: &str| confirm_field.focus())
                         .placeholder(format!("主密码（至少 {MIN_PASSWORD_CHARS} 个字符）"))
                         .auto_focus(true),
                 )
                 .child(
                     field()
                         .test_id("vault-confirm")
+                        .element_ref(&confirm_field)
                         .masked(true)
                         .value(move || confirm.get())
                         .on_change(move |t: &str| confirm.set(t.to_owned()))
@@ -144,7 +147,9 @@ pub fn setup_view(state: AppState) -> impl IntoElement {
                 .w_full()
                 .gap(px(10.0))
                 .pt(px(6.0))
-                .child(dynamic(move || check_fields(positions.get(), typed)))
+                .child(dynamic(move || {
+                    check_fields(positions.get(), typed, create)
+                }))
                 .child(steps(
                     text_button("上一步", Tone::Plain, move || step.set(1)),
                     text_button(
@@ -222,6 +227,7 @@ pub fn unlock_view(state: AppState) -> impl IntoElement {
     // A device that joined sync needs the secret key once.
     let needs_key = untracked(|| services().vault().needs_account_key());
     let account_key = signal(String::new());
+    let password_field = element_ref();
     let unlock = move || {
         state.vault_unlock(password.get(), needs_key.then(|| account_key.get()));
         password.set(String::new());
@@ -250,18 +256,21 @@ pub fn unlock_view(state: AppState) -> impl IntoElement {
                         .test_id("vault-secret-key")
                         .value(move || account_key.get())
                         .on_change(move |t: &str| account_key.set(t.to_owned()))
+                        .on_submit(move |_: &str| password_field.focus())
                         .placeholder("秘密密钥 CX-XXXXX-…")
+                        .auto_focus(true)
                 },
             ))
             .child(
                 field()
                     .test_id("vault-password")
+                    .element_ref(&password_field)
                     .masked(true)
                     .value(move || password.get())
                     .on_change(move |t: &str| password.set(t.to_owned()))
                     .on_submit(move |_: &str| unlock())
                     .placeholder("主密码")
-                    .auto_focus(true),
+                    .auto_focus(!needs_key),
             )
             .child(
                 text_button(

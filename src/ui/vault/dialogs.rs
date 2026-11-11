@@ -71,6 +71,31 @@ fn secret_field(value: Signal<String>, id: &str, placeholder: &'static str) -> I
         .placeholder(placeholder)
 }
 
+/// Three secret fields: Enter goes to the next, and submits in the last.
+fn secret_fields(
+    values: [Signal<String>; 3],
+    placeholders: [&'static str; 3],
+    submit: impl Fn() + Copy + 'static,
+) -> View {
+    let refs = [(); 3].map(|()| element_ref());
+    view().gap(px(8.0)).child(
+        values
+            .into_iter()
+            .zip(placeholders)
+            .enumerate()
+            .map(|(i, (value, placeholder))| {
+                secret_field(value, &format!("vault-dialog-{}", i + 1), placeholder)
+                    .element_ref(&refs[i])
+                    .on_submit(move |_: &str| match refs.get(i + 1) {
+                        Some(next) => next.focus(),
+                        None => submit(),
+                    })
+                    .auto_focus(i == 0)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn password_dialog(state: AppState) -> impl IntoElement {
     let purpose = untracked(move || state.vault_purpose.get());
     let first = signal(String::new());
@@ -117,21 +142,25 @@ fn password_dialog(state: AppState) -> impl IntoElement {
                     .auto_focus(true)
                     .into_element()
             }
-            VaultPurpose::ChangePassword => view()
-                .gap(px(8.0))
-                .child(secret_field(first, "vault-dialog-1", "当前主密码").auto_focus(true))
-                .child(secret_field(second, "vault-dialog-2", "新主密码"))
-                .child(secret_field(third, "vault-dialog-3", "再次输入新主密码"))
-                .into_element(),
-            VaultPurpose::Export => view()
-                .gap(px(8.0))
-                .child(secret_field(first, "vault-dialog-1", "主密码").auto_focus(true))
-                .child(secret_field(second, "vault-dialog-2", "备份密码"))
-                .child(secret_field(third, "vault-dialog-3", "再次输入备份密码"))
-                .into_element(),
+            VaultPurpose::ChangePassword => secret_fields(
+                [first, second, third],
+                ["当前主密码", "新主密码", "再次输入新主密码"],
+                submit,
+            )
+            .into_element(),
+            VaultPurpose::Export => secret_fields(
+                [first, second, third],
+                ["主密码", "备份密码", "再次输入备份密码"],
+                submit,
+            )
+            .into_element(),
             VaultPurpose::Import => view()
                 .gap(px(8.0))
-                .child(secret_field(first, "vault-dialog-1", "备份密码").auto_focus(true))
+                .child(
+                    secret_field(first, "vault-dialog-1", "备份密码")
+                        .on_submit(move |_: &str| submit())
+                        .auto_focus(true),
+                )
                 .child(segmented(
                     vec![(ImportMode::Merge, "合并"), (ImportMode::Replace, "替换")],
                     move || mode.get(),
@@ -198,6 +227,11 @@ fn reset_dialog(state: AppState) -> impl IntoElement {
                 .test_id("vault-reset")
                 .value(move || typed.get())
                 .on_change(move |t: &str| typed.set(t.to_owned()))
+                .on_submit(move |_: &str| {
+                    if typed.with(|t| t.trim() == RESET_WORD) {
+                        state.vault_reset();
+                    }
+                })
                 .auto_focus(true),
         )
         .child(footer(

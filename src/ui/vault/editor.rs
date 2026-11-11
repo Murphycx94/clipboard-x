@@ -9,7 +9,9 @@ use crate::vault::generator::{GeneratorOptions, generate};
 
 use super::super::icons::Icon;
 use super::super::state::{AppState, DialogKind};
-use super::super::widgets::{Tone, field, icon_button, modal, muted, segmented, text_button};
+use super::super::widgets::{
+    Tone, field, icon_button, modal, muted, segmented, submit_with_mod_enter, text_button,
+};
 
 const LENGTHS: [(usize, &str); 4] = [(12, "12 位"), (16, "16 位"), (20, "20 位"), (32, "32 位")];
 
@@ -92,16 +94,19 @@ pub fn editor_dialog(state: AppState) -> impl IntoElement {
         Err(_) => state.error("请至少选择一种字符"),
     };
     let existing = id.is_some();
-    let save_id = id.clone();
+    let save_id = signal(id);
+    // Enter in a one-line field saves; ⌘↩ anywhere, the note too.
+    let save = move || state.vault_save(save_id.get(), draft.entry());
+    submit_with_mod_enter(save);
     let content = view()
         .gap(px(10.0))
         .child(labeled(
             "名称",
-            text_field(draft.title, "vault-title", "例如 GitHub").auto_focus(!existing),
+            text_field(draft.title, "vault-title", "例如 GitHub", save).auto_focus(!existing),
         ))
         .child(labeled(
             "账号",
-            text_field(draft.username, "vault-username", "用户名或邮箱"),
+            text_field(draft.username, "vault-username", "用户名或邮箱", save),
         ))
         .child(labeled(
             "密码",
@@ -110,7 +115,7 @@ pub fn editor_dialog(state: AppState) -> impl IntoElement {
                 .items_center()
                 .gap(px(2.0))
                 .child(
-                    text_field(draft.password, "vault-password-field", "密码")
+                    text_field(draft.password, "vault-password-field", "密码", save)
                         .flex_1()
                         .masked(move || !reveal.get()),
                 )
@@ -148,7 +153,7 @@ pub fn editor_dialog(state: AppState) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap(px(2.0))
-                .child(text_field(draft.url, "vault-url", "https://").flex_1())
+                .child(text_field(draft.url, "vault-url", "https://", save).flex_1())
                 .child(when(
                     move || draft.url.with(|u| openable(u).is_some()),
                     move || {
@@ -162,7 +167,12 @@ pub fn editor_dialog(state: AppState) -> impl IntoElement {
         ))
         .child(labeled(
             "两步验证",
-            text_field(draft.totp, "vault-totp", "otpauth:// 链接或 Base32 密钥"),
+            text_field(
+                draft.totp,
+                "vault-totp",
+                "otpauth:// 链接或 Base32 密钥",
+                save,
+            ),
         ))
         .child(labeled(
             "备注",
@@ -194,10 +204,8 @@ pub fn editor_dialog(state: AppState) -> impl IntoElement {
                     state.dialog.set(None)
                 }))
                 .child(
-                    text_button("保存", Tone::Primary, move || {
-                        state.vault_save(save_id.clone(), draft.entry())
-                    })
-                    .disabled(move || state.vault_busy.get()),
+                    text_button("保存", Tone::Primary, save)
+                        .disabled(move || state.vault_busy.get()),
                 ),
         );
     modal(
@@ -224,11 +232,17 @@ fn labeled(label: &'static str, control: impl IntoElement) -> impl IntoElement {
         .child(control)
 }
 
-fn text_field(value: Signal<String>, id: &str, placeholder: &'static str) -> Input {
+fn text_field(
+    value: Signal<String>,
+    id: &str,
+    placeholder: &'static str,
+    save: impl Fn() + 'static,
+) -> Input {
     field()
         .test_id(id)
         .value(move || value.get())
         .on_change(move |t: &str| value.set(t.to_owned()))
+        .on_submit(move |_: &str| save())
         .placeholder(placeholder)
 }
 
