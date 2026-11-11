@@ -77,11 +77,14 @@ fn word_cell(number: usize, word: &'static str) -> impl IntoElement {
         )
 }
 
-/// A field per checked position, each labelled with its number.
+/// A field per checked position, each labelled with its number. Enter goes
+/// to the next field, and runs `after` in the last.
 pub(super) fn check_fields(
     positions: [usize; CHECKED_WORDS],
     typed: [Signal<String>; CHECKED_WORDS],
+    after: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {
+    let refs = [(); CHECKED_WORDS].map(|()| element_ref());
     view().gap(px(6.0)).child(
         positions
             .iter()
@@ -102,8 +105,13 @@ pub(super) fn check_fields(
                         field()
                             .flex_1()
                             .test_id(&format!("recovery-check-{i}"))
+                            .element_ref(&refs[i])
                             .value(move || value.get())
                             .on_change(move |t: &str| value.set(t.to_owned()))
+                            .on_submit(move |_: &str| match refs.get(i + 1) {
+                                Some(next) => next.focus(),
+                                None => after(),
+                            })
                             .auto_focus(i == 0),
                     )
             })
@@ -200,6 +208,7 @@ pub fn phrase_dialog(state: AppState) -> impl IntoElement {
     let positions = checked_positions();
     let typed = [(); CHECKED_WORDS].map(|()| signal(String::new()));
     let password = signal(String::new());
+    let password_field = element_ref();
     let busy = move || state.vault_busy.get();
     let show = move || {
         view()
@@ -237,10 +246,13 @@ pub fn phrase_dialog(state: AppState) -> impl IntoElement {
                     .text_xs()
                     .text_color(muted),
             )
-            .child(check_fields(positions, typed))
+            .child(check_fields(positions, typed, move || {
+                password_field.focus()
+            }))
             .child(
                 field()
                     .test_id("recovery-password")
+                    .element_ref(&password_field)
                     .masked(true)
                     .value(move || password.get())
                     .on_change(move |t: &str| password.set(t.to_owned()))
@@ -274,6 +286,8 @@ pub fn recover_dialog(state: AppState) -> impl IntoElement {
     let phrase = signal(String::new());
     let password = signal(String::new());
     let confirm = signal(String::new());
+    let new_field = element_ref();
+    let confirm_field = element_ref();
     let busy = move || state.vault_busy.get();
     // The fields stay for another try; they go with the dialog.
     let submit = move || state.vault_recover(phrase.get(), password.get(), confirm.get());
@@ -289,20 +303,24 @@ pub fn recover_dialog(state: AppState) -> impl IntoElement {
                 .test_id("recovery-phrase")
                 .value(move || phrase.get())
                 .on_change(move |t: &str| phrase.set(t.to_owned()))
+                .on_submit(move |_: &str| new_field.focus())
                 .placeholder("助记词")
                 .auto_focus(true),
         )
         .child(
             field()
                 .test_id("recovery-new")
+                .element_ref(&new_field)
                 .masked(true)
                 .value(move || password.get())
                 .on_change(move |t: &str| password.set(t.to_owned()))
+                .on_submit(move |_: &str| confirm_field.focus())
                 .placeholder(format!("新主密码（至少 {MIN_PASSWORD_CHARS} 个字符）")),
         )
         .child(
             field()
                 .test_id("recovery-confirm")
+                .element_ref(&confirm_field)
                 .masked(true)
                 .value(move || confirm.get())
                 .on_change(move |t: &str| confirm.set(t.to_owned()))

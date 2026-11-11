@@ -158,6 +158,16 @@ pub fn text_button(
 pub type ButtonBuilder = nsh_base::ButtonElement;
 
 /// A text field in the app's look.
+/// Submits the open form with ⌘↩ (Ctrl+Enter elsewhere), from any field,
+/// a multi-line one too: bound while the calling component lives.
+pub fn submit_with_mod_enter(submit: impl Fn() + 'static) {
+    let options = KeyOptions {
+        when: nsh_core::keymap::When::Always,
+        repeat: false,
+    };
+    on_key_with("mod+enter", options, move |_| submit());
+}
+
 pub fn field() -> Input {
     nsh_base::input()
         .h(px(30.0))

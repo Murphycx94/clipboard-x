@@ -421,6 +421,8 @@ fn setup_dialog(state: AppState) -> impl IntoElement {
     let url = signal(String::new());
     let code = signal(String::new());
     let name = signal(DEFAULT_DEVICE_NAME.to_owned());
+    let code_field = element_ref();
+    let name_field = element_ref();
     let next = move || {
         state.sync_setup_next(SyncForm {
             url: url.get(),
@@ -449,18 +451,26 @@ fn setup_dialog(state: AppState) -> impl IntoElement {
             view()
                 .gap(px(4.0))
                 .child(label("服务器地址（Tailscale）"))
-                .child(input(url, "sync-url", "http://100.x.x.x:8787").auto_focus(true)),
+                .child(
+                    input(url, "sync-url", "http://100.x.x.x:8787")
+                        .on_submit(move |_: &str| code_field.focus())
+                        .auto_focus(true),
+                ),
         )
-        .child(view().gap(px(4.0)).child(label(code_label)).child(input(
-            code,
-            "sync-code",
-            "XXXX-XXXX",
-        )))
-        .child(view().gap(px(4.0)).child(label("设备名称")).child(input(
-            name,
-            "sync-device",
-            DEFAULT_DEVICE_NAME,
-        )))
+        .child(
+            view().gap(px(4.0)).child(label(code_label)).child(
+                input(code, "sync-code", "XXXX-XXXX")
+                    .element_ref(&code_field)
+                    .on_submit(move |_: &str| name_field.focus()),
+            ),
+        )
+        .child(
+            view().gap(px(4.0)).child(label("设备名称")).child(
+                input(name, "sync-device", DEFAULT_DEVICE_NAME)
+                    .element_ref(&name_field)
+                    .on_submit(move |_: &str| next()),
+            ),
+        )
         .child(
             view()
                 .flex_row()
@@ -492,6 +502,7 @@ fn secret_dialog(state: AppState) -> impl IntoElement {
     let reveal = untracked(move || state.sync_secret_reveal.get());
     let confirmation = signal(String::new());
     let password = signal(String::new());
+    let password_field = element_ref();
     let close = move || {
         state.sync_secret.set(String::new());
         state.dialog.set(None);
@@ -547,11 +558,13 @@ fn secret_dialog(state: AppState) -> impl IntoElement {
             )
             .child(
                 input(confirmation, "sync-confirm", "输入密钥倒数第二组的 5 个字符以确认")
+                    .on_submit(move |_: &str| password_field.focus())
                     .auto_focus(true),
             )
             .child(
                 field()
                     .test_id("sync-password")
+                    .element_ref(&password_field)
                     .masked(true)
                     .value(move || password.get())
                     .on_change(move |t: &str| password.set(t.to_owned()))
