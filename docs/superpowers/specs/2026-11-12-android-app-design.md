@@ -24,13 +24,14 @@
 | 剪贴板历史同步 | 第一版只存本机 |
 | 技术路线 | A：同一个 Rust crate 加安卓目标，UI 继续用 NSH；系统能力用 `nsh.aar` 的 Kotlin 薄壳桥接；先做 spike，走不通再退到"Compose + Rust 核心（UniFFI）" |
 | 安卓专属能力 | 只做生物识别解锁密码本 |
+| NSH 版本 | 升级到 0.5.0（安卓打包由 nsh CLI 按它自己的版本编译本 crate，桌面与安卓须同版本） |
 
 ## 3. 平台限制与对策
 
 Android 10 起，非默认输入法的应用在后台读不到剪贴板。对策：
 
-- **前台读取**：App 每次回到前台（以及冷启动）时读一次剪贴板，内容新就记入历史（沿用按哈希去重、重复条目移到最前）。App 在前台期间按现有 500ms 节奏轮询，切到后台后停止。
-- 读取文本与图片；图片沿用现有的缩放与 PNG 压缩。
+- **前台读取**：App 每次回到前台（以及冷启动）时读一次剪贴板，内容新就记入历史（沿用按哈希去重、重复条目移到最前）。不在前台期间轮询：Android 12 起，App 每次读取其他应用复制的内容，系统都会提示"已粘贴自剪贴板"，轮询会反复弹出提示。
+- 只记录文本：NSH 在安卓上不读写剪贴板图片。图片记录留到以后经 Kotlin 壳实现。
 - 用户需要知道这一点：首次打开时在历史为空的占位文案里说明"复制后回到 ClipboardX 即会记录"。
 
 ## 4. 架构
@@ -48,8 +49,8 @@ Android 10 起，非默认输入法的应用在后台读不到剪贴板。对策
 | 模块 | 安卓做法 |
 |---|---|
 | `db`、`model`、`vault/*`、`cloud`、`telegram`、`crates/sync-proto` | 原样复用 |
-| `capture` 读剪贴板 | 新增 `ClipboardPort` trait（读文本、读图片、写文本、写敏感文本、是否被标记为敏感）。桌面实现包装 `arboard` 与现有 macOS 代码；安卓实现用 NSH 的 `clipboard_string()` / `clipboard_image()` / `set_clipboard()` |
-| `capture` 轮询 | 安卓：前台轮询、后台停止（由 NSH 的前后台事件驱动）；桌面不变 |
+| `capture` 读剪贴板 | 拆为 `capture/mod.rs`（哈希、去重 `Recorder`、存储、缩略图、本 App 复制的密码跳过）+ `capture/desktop.rs`（`arboard`，行为不变）+ `capture/android.rs`（NSH 的 `clipboard_string()` / `set_clipboard()`，在 UI 线程调用） |
+| `capture` 轮询 | 安卓：不轮询，NSH `lifecycle()` 变为 Active 时读一次；桌面不变 |
 | `capture::copy_secret` | 安卓 13+ 通过 Kotlin 壳设置 `ClipDescription.EXTRA_IS_SENSITIVE`；30 秒后内容未变则清空的逻辑保留 |
 | `hotkey`、`tray-icon`、`global-hotkey`、`arboard`、`macos` | 依赖移到 `cfg(not(target_os = "android"))`，模块只在桌面编译 |
 | `vault/keychain` | 新增 `AndroidKeyStore` 实现现有 `KeyStore` trait（见 4.3） |
@@ -86,7 +87,7 @@ Keystore、BiometricPrompt、敏感剪贴板标记、`filesDir` 只能从 Java/K
 
 ## 6. 数据流
 
-- 剪贴板：前台事件 → `capture` 读 `ClipboardPort` → 去重 → `db` → `services.notify_changed()` → UI 刷新（与桌面同一路径）。
+- 剪贴板：`lifecycle()` 变为 Active → `capture::read_foreground()` → `Services::record_clipboard`（`Recorder` 去重） → `db` → `services.notify_changed()` → UI 刷新（与桌面同一路径）。
 - 密码本、同步：与桌面完全相同（`VaultService` + `cloud` 工作线程 + WebSocket）。App 进入后台时 NSH 宿主可能被系统暂停，同步线程停止无妨；回到前台且已解锁时立即同步一次（复用现有"解锁后立即同步"逻辑）。
 - 网络规则不变：只允许以明文 http 访问 Tailscale 地址和本机。手机上需安装并连接 Tailscale App；`AndroidManifest` 的网络安全配置允许 `100.64.0.0/10` 和 `*.ts.net` 的明文流量（Rust 侧的地址校验仍然生效）。
 
@@ -106,14 +107,14 @@ Keystore、BiometricPrompt、敏感剪贴板标记、`filesDir` 只能从 Java/K
 ## 9. 测试
 
 - 现有 `cargo test --workspace`（桌面）必须继续通过；`cargo clippy` 对安卓目标（`--target aarch64-linux-android`）也要无警告。
-- 新增单元测试：`ClipboardPort` 的假实现驱动前台采集（去重、敏感内容不记录、后台不轮询）；触屏交互（长按菜单）的 headless UI 测试（`nsh-testing`）。
+- 新增单元测试：`capture::Recorder` 与 `Services::record_clipboard`（去重、本 App 复制的密码不记录、记录后通知 UI）；触屏交互（长按菜单）的 headless UI 测试（`nsh-testing`）。
 - `AndroidKeyStore` 无法在宿主机测试：在模拟器上手工验证，清单写入实施计划。
 - 端到端：模拟器上与本地起的同步服务器联调（桌面端改一条 → 手机端出现，反之亦然）。
 
 ## 10. 实施顺序
 
 0. **Spike**（不通过就停下重新评估路线）：装好工具链，在 arm64 模拟器上跑起本 crate；验证 `rusqlite`（bundled）、`argon2`、`reqwest`/`tungstenite`（rustls）能交叉编译，界面能显示。
-1. 平台隔离：依赖与模块的 `cfg` 拆分、`startup()`、`ClipboardPort`，安卓目标编译通过、桌面测试全绿。
+1. 平台隔离：依赖与模块的 `cfg` 拆分、`startup()`、`capture` 拆分，安卓目标编译通过、桌面测试全绿。
 2. 前台剪贴板采集。
 3. 移动布局：TabBar、长按菜单、设置项裁剪。
 4. Kotlin 壳与 `AndroidKeyStore`、生物识别解锁、敏感复制。
