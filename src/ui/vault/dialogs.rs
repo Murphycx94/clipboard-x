@@ -5,6 +5,7 @@ use nsh_core::prelude::*;
 
 use crate::vault::ImportMode;
 
+use super::super::mobile::is_touch;
 use super::super::state::{AppState, DialogKind, VaultPurpose};
 use super::super::widgets::{Tone, field, modal, muted, segmented, text_button};
 use super::editor::editor_dialog;
@@ -114,6 +115,11 @@ fn password_dialog(state: AppState) -> impl IntoElement {
         }
     };
     let (title, note, confirm) = match purpose {
+        VaultPurpose::EnableTouchId if is_touch() => (
+            "开启指纹/面容解锁",
+            "输入主密码，再验证指纹或面容。",
+            "开启",
+        ),
         VaultPurpose::EnableTouchId => {
             ("开启 Touch ID", "输入主密码以开启 Touch ID 解锁。", "开启")
         }

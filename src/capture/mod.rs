@@ -102,7 +102,6 @@ pub(crate) fn begin_secret_copy(text: &str) -> u64 {
 
 /// Whether secret copy `copy` is the latest: an older one's timer leaves
 /// the clipboard alone.
-#[cfg_attr(target_os = "android", allow(dead_code))] // The Android host clears it (step 4).
 pub(crate) fn is_latest_secret_copy(copy: u64) -> bool {
     SECRET_COPIES.load(std::sync::atomic::Ordering::SeqCst) == copy
 }
