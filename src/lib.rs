@@ -10,6 +10,7 @@
 pub mod capture;
 pub mod cloud;
 pub mod db;
+#[cfg(not(target_os = "android"))]
 pub mod hotkey;
 pub mod logger;
 pub mod model;
@@ -31,6 +32,21 @@ pub const THEME_JSON: &str = include_str!("../theme.json");
 #[native_module("clipboardx/native")]
 fn native(registry: &mut Registry) {
     registry.register::<App>();
+}
+
+/// What comes before the UI on every platform, once: the data directory
+/// and the log. The desktops' `main` calls it; on Android, where NSH's host
+/// mounts [`App`] with no `main` of ours, `App` does.
+pub fn startup() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let dir = services::data_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("cannot create {}: {e}", dir.display());
+        }
+        logger::init(&dir);
+        log::info!("ClipboardX {} starting", env!("CARGO_PKG_VERSION"));
+    });
 }
 
 /// The root a host mounts: [`App`] with the app's id and theme.

@@ -164,6 +164,7 @@ pub fn submit_with_mod_enter(submit: impl Fn() + 'static) {
     let options = KeyOptions {
         when: nsh_core::keymap::When::Always,
         repeat: false,
+        pass_through: false,
     };
     on_key_with("mod+enter", options, move |_| submit());
 }
