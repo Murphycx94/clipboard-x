@@ -3,6 +3,7 @@
 pub mod account_key;
 pub mod backup;
 pub mod crypto;
+pub mod device_store;
 pub mod entry;
 pub mod error;
 pub mod generator;
@@ -920,12 +921,18 @@ impl VaultService {
         let bytes = self
             .keys
             .get_with_auth(KeyItem::DataKey, reason)
-            .map_err(VaultError::Keychain)?;
+            .map_err(|why| {
+                if self.keys.contains(KeyItem::DataKey) {
+                    VaultError::Keychain(why)
+                } else {
+                    VaultError::BiometricKeyGone(why)
+                }
+            })?;
         let dek = SecretKey::from_slice(&bytes)
-            .map_err(|_| VaultError::Keychain("Touch ID 密钥已失效，请用主密码解锁".into()))?;
+            .map_err(|_| VaultError::Keychain("快捷解锁的密钥已失效，请用主密码解锁".into()))?;
         if !matches_check(&dek, &meta.key_check) {
             return Err(VaultError::Keychain(
-                "Touch ID 密钥已失效，请用主密码解锁".into(),
+                "快捷解锁的密钥已失效，请用主密码解锁".into(),
             ));
         }
         self.open_session(dek, now_ms(), generation)
@@ -1363,7 +1370,28 @@ mod tests {
         assert_eq!(v.status(), VaultStatus::Unlocked);
         v.disable_touch_id();
         v.lock();
-        assert!(v.unlock_with_touch_id("解锁密码本").is_err());
+        // The key is gone (turned off here; on a phone also when the
+        // enrolled fingerprints change): the UI turns the setting off.
+        assert!(matches!(
+            v.unlock_with_touch_id("解锁密码本").unwrap_err(),
+            VaultError::BiometricKeyGone(_)
+        ));
+    }
+
+    #[test]
+    fn a_refused_confirmation_keeps_touch_id_on() {
+        let v = VaultService::with_params(
+            Arc::new(Database::in_memory().unwrap()),
+            Box::new(MemoryKeyStore::without_auth()),
+            KdfParams::INSECURE_TEST,
+        );
+        v.setup("correct horse battery").unwrap();
+        v.enable_touch_id("correct horse battery").unwrap();
+        v.lock();
+        assert!(matches!(
+            v.unlock_with_touch_id("解锁密码本").unwrap_err(),
+            VaultError::Keychain(_)
+        ));
     }
 
     #[test]

@@ -1,19 +1,37 @@
-//! Android's clipboard, through NSH (reading it: [`super::read_foreground`]).
-//! NSH writes no images there: the history keeps text only.
+//! Android's clipboard, through NSH (reading it: [`super::read_foreground`])
+//! and, for secrets, through the bridge (`crate::android`), which alone
+//! reaches the clip's sensitive flag. NSH writes no images there: the
+//! history keeps text only.
 //!
 //! These run on the UI thread (NSH's clipboard is the engine's).
 
+use std::thread;
+
 use nsh_core::prelude::set_clipboard;
 
-use super::begin_secret_copy;
+use super::{SECRET_LIFETIME, begin_secret_copy, is_latest_secret_copy};
+use crate::android;
 use crate::db::{Database, ItemContent};
 
-/// Copies `text` as a secret: left out of our history. Marking it for the
-/// system and clearing it after 30 seconds are the Android host's (it
-/// alone reaches `ClipDescription`).
+/// Copies `text` as a secret: marked sensitive (left out of the system's
+/// previews and keyboards' suggestions) and out of our history, and cleared
+/// after [`SECRET_LIFETIME`] unless something else was copied.
 pub fn copy_secret(text: &str) -> Result<(), String> {
-    begin_secret_copy(text);
-    set_clipboard(text);
+    let copy = begin_secret_copy(text);
+    android::copy_sensitive(text, copy)?;
+    thread::Builder::new()
+        .name("secret-clear".into())
+        .spawn(move || {
+            thread::sleep(SECRET_LIFETIME);
+            // A later secret copy has a timer of its own.
+            if !is_latest_secret_copy(copy) {
+                return;
+            }
+            if let Err(e) = android::clear_sensitive(copy) {
+                log::error!("cannot clear a copied secret: {e}");
+            }
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

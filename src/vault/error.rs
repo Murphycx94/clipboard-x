@@ -35,6 +35,9 @@ pub enum VaultError {
     InvalidTotp(String),
     InvalidBackup(String),
     Keychain(String),
+    /// The key for Touch ID or the fingerprint is no longer stored (turned
+    /// off, or the enrolled fingerprints changed): why, for the user.
+    BiometricKeyGone(String),
     Storage(String),
     Crypto,
 }
@@ -71,7 +74,8 @@ impl fmt::Display for VaultError {
             VaultError::NotFound => f.write_str("条目不存在"),
             VaultError::InvalidTotp(why)
             | VaultError::InvalidBackup(why)
-            | VaultError::Keychain(why) => f.write_str(why),
+            | VaultError::Keychain(why)
+            | VaultError::BiometricKeyGone(why) => f.write_str(why),
             VaultError::Storage(_) => f.write_str("读写密码本失败"),
             VaultError::Crypto => f.write_str("加密操作失败"),
         }

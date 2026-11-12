@@ -19,8 +19,8 @@ pub enum KeyItem {
 }
 
 impl KeyItem {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // AndroidKeyStore (step 4).
-    fn account(self) -> &'static str {
+    /// The item's name in the system's store.
+    pub(crate) fn account(self) -> &'static str {
         match self {
             KeyItem::DataKey => "data-key",
             KeyItem::SecretKey => "secret-key",
@@ -39,6 +39,10 @@ pub trait KeyStore: Send + Sync {
     /// The item after the system confirmed the user (`reason` shown). Blocking.
     fn get_with_auth(&self, item: KeyItem, reason: &str) -> Result<Zeroizing<Vec<u8>>, String>;
     fn delete(&self, item: KeyItem);
+    /// Whether the item is stored (without asking the user).
+    fn contains(&self, item: KeyItem) -> bool {
+        self.get(item).is_some()
+    }
 }
 
 /// In memory, for the process's life: tests, and platforms without a
@@ -193,15 +197,28 @@ mod mac {
 /// then live in memory, without Touch ID.
 pub const NO_KEYCHAIN_ENV: &str = "CLIPBOARDX_NO_KEYCHAIN";
 
-/// The platform's store.
-pub fn platform() -> Box<dyn KeyStore> {
+/// The platform's store; Android's keeps its sealed files in `data_dir`.
+pub fn platform(data_dir: &std::path::Path) -> Box<dyn KeyStore> {
     if std::env::var_os(NO_KEYCHAIN_ENV).is_some() {
         return Box::new(MemoryKeyStore::without_auth());
     }
     #[cfg(target_os = "macos")]
-    return Box::new(mac::MacKeyStore);
-    #[cfg(not(target_os = "macos"))]
-    Box::new(MemoryKeyStore::without_auth())
+    {
+        let _ = data_dir;
+        Box::new(mac::MacKeyStore)
+    }
+    #[cfg(target_os = "android")]
+    {
+        Box::new(super::device_store::DeviceStore::new(
+            data_dir.join("keys"),
+            crate::android::KeystoreSealer,
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    {
+        let _ = data_dir;
+        Box::new(MemoryKeyStore::without_auth())
+    }
 }
 
 #[cfg(test)]
