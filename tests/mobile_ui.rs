@@ -2,6 +2,8 @@
 //! the app comes to the foreground, the desktop's shortcuts and window
 //! controls are gone, and a long press on an item opens its actions.
 
+use std::time::Duration;
+
 use clipboardx::services::DATA_DIR_ENV;
 use clipboardx::vault::keychain::NO_KEYCHAIN_ENV;
 use nsh_core::geometry::{Points, Size};
@@ -12,13 +14,16 @@ use nsh_testing::Headless;
 mod common;
 use common::wait;
 
+const VIEWPORT_HEIGHT: f32 = 900.0;
+const AWAY: Duration = Duration::from_millis(400);
+
 fn start_phone() -> Headless {
     let mut config = EngineConfig::new(clipboardx::root());
     config.environment.os = Os::Android;
     config.environment.idiom = Idiom::Phone;
     config.viewport = Size {
         width: Points(412.0),
-        height: Points(900.0),
+        height: Points(VIEWPORT_HEIGHT),
     };
     let mut app = Headless::start(config).expect("engine starts");
     app.first_render().expect("first render");
@@ -31,6 +36,9 @@ fn copy_elsewhere(app: &mut Headless, text: &str) {
         e.lifecycle = Lifecycle::Background;
     })
     .unwrap();
+    // Away longer than the app's lifecycle check takes to see it.
+    std::thread::sleep(AWAY);
+    app.settle();
     app.set_clipboard(Some(text.to_owned()));
     app.set_environment("back to the foreground", |e| {
         e.lifecycle = Lifecycle::Active;
@@ -79,4 +87,29 @@ fn a_phone_records_on_return_and_acts_on_long_press() {
     app.press("删除").unwrap();
     app.wait_for_gone("copied in another app", common::SLOW)
         .unwrap();
+
+    // A dialog moves up out of the software keyboard's way.
+    copy_elsewhere(&mut app, "with a note");
+    wait(&mut app, "with a note");
+    app.long_press("with a note").unwrap();
+    wait(&mut app, "备注");
+    app.press("备注").unwrap();
+    wait(&mut app, "输入备注内容…");
+    let keyboard = 380.0;
+    app.set_environment("the keyboard shows", |e| {
+        e.keyboard_height = Points(keyboard);
+    })
+    .unwrap();
+    app.settle();
+    let save = app
+        .screen()
+        .layout_nodes()
+        .into_iter()
+        .find(|n| n.text.as_ref().is_some_and(|t| t.text.text == "保存"))
+        .expect("the save button");
+    assert!(
+        save.bounds.bottom().0 <= VIEWPORT_HEIGHT - keyboard,
+        "保存 at {:?} is under the keyboard",
+        save.bounds
+    );
 }

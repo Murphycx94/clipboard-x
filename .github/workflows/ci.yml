@@ -1,9 +1,9 @@
 name: CI
 
 # Every push and pull request: format, lint and test, then package a
-# universal macOS app (a workflow artifact). Pushes to main whose version
-# (Cargo.toml) has no tag yet also publish a GitHub release v<version>,
-# which the app's update check finds.
+# universal macOS app and an Android APK (workflow artifacts). Pushes to
+# main whose version (Cargo.toml) has no tag yet also publish a GitHub
+# release v<version>, which the app's update check finds.
 
 on:
   push:
@@ -124,6 +124,75 @@ jobs:
             dist/ClipboardX-*.sha256
           if-no-files-found: error
 
+  android:
+    name: package Android
+    needs: [check, version]
+    runs-on: ubuntu-latest
+    env:
+      # The CLI builds this crate against its own NSH: keep it at the
+      # version Cargo.toml depends on.
+      NSH_VERSION: v0.5.0
+    steps:
+      - uses: actions/checkout@v4
+
+      # The bridge (android/java) is compiled by build.rs with javac; the
+      # runner's Android SDK has the platform, build-tools (d8) and NDK.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      # The library only: the dev-dependencies (the headless UI tests)
+      # do not build for Android. SQLite's C needs the NDK's compiler.
+      - name: Clippy for Android
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          export CC_aarch64_linux_android="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
+          export AR_aarch64_linux_android="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          cargo clippy --lib --target aarch64-linux-android -- -D warnings
+
+      - name: Install NSH
+        run: |
+          curl -fsSL https://nsh.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Release-signed when the keystore secrets are set; a release refuses
+      # the debug key.
+      - name: Package the APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SHOULD_RELEASE: ${{ needs.version.outputs.should_release }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            export ANDROID_KEYSTORE="$RUNNER_TEMP/release.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$ANDROID_KEYSTORE"
+          fi
+          if [ "$SHOULD_RELEASE" = true ]; then
+            scripts/package-android.sh --release
+          else
+            scripts/package-android.sh
+          fi
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipboardX-${{ needs.version.outputs.version }}-android
+          path: |
+            dist/ClipboardX-*-android.apk
+            dist/ClipboardX-*-android.apk.sha256
+          if-no-files-found: error
+
   server:
     name: package sync server (Linux)
     needs: [check, version]
@@ -166,7 +235,7 @@ jobs:
 
   release:
     name: release
-    needs: [version, package, server]
+    needs: [version, package, android, server]
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -175,6 +244,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ClipboardX-${{ needs.version.outputs.version }}-macos
+          path: artifacts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ClipboardX-${{ needs.version.outputs.version }}-android
           path: artifacts
 
       - uses: actions/download-artifact@v4
@@ -196,9 +270,12 @@ jobs:
             在"访达"中按住 Control 点按应用并选择"打开"，或在终端运行
             `xattr -dr com.apple.quarantine /Applications/ClipboardX.app`。
 
+            `ClipboardX-…-android.apk` 是安卓版（Android 8 及以上），下载后在手机上安装；首次安装需允许浏览器或文件管理器"安装未知应用"。
+
             `clipboardx-sync-server-…-linux-x86_64.tar.gz` 是密码本云同步的服务端（静态编译），部署说明见压缩包内的 README.md。
           files: |
             artifacts/ClipboardX-*.dmg
             artifacts/ClipboardX-*-macos-universal.zip
+            artifacts/ClipboardX-*-android.apk
             artifacts/clipboardx-sync-server-*-linux-x86_64.tar.gz
             artifacts/*.sha256
