@@ -9,3 +9,6 @@ server/data/
 data/
 *.env
 !*.env.example
+# Android signing keys
+*.jks
+*.keystore
