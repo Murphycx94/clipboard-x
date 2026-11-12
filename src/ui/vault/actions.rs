@@ -8,6 +8,7 @@ use zeroize::Zeroizing;
 use crate::services::services;
 use crate::vault::{Field, ImportMode, VaultEntry, VaultError, VaultStatus, now_ms};
 
+use super::super::mobile::biometric;
 use super::super::state::{AppState, DialogKind, Page, VaultPurpose};
 
 const TOUCH_ID_REASON: &str = "解锁 ClipboardX 密码本";
@@ -133,10 +134,24 @@ impl AppState {
         );
     }
 
+    /// Unlocks with Touch ID or the fingerprint; when its key is gone the
+    /// setting goes off, so the lock page stops offering it.
     pub fn vault_unlock_touch_id(self) {
         self.run_vault(
-            || services().vault().unlock_with_touch_id(TOUCH_ID_REASON),
-            |()| services().sync_now(),
+            || match services().vault().unlock_with_touch_id(TOUCH_ID_REASON) {
+                Err(VaultError::BiometricKeyGone(why)) => {
+                    services().db().set_vault_touch_id(false)?;
+                    Ok(Some(why))
+                }
+                unlocked => unlocked.map(|()| None),
+            },
+            move |gone| match gone {
+                None => services().sync_now(),
+                Some(why) => {
+                    self.reload();
+                    self.error(why);
+                }
+            },
         );
     }
 
@@ -275,7 +290,7 @@ impl AppState {
             move |()| {
                 self.dialog.set(None);
                 self.reload();
-                self.success("已开启 Touch ID 解锁");
+                self.success(format!("已开启{}解锁", biometric()));
             },
         );
     }

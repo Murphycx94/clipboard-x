@@ -70,10 +70,14 @@ fn platform_data_dir() -> PathBuf {
         .join(APP_ID)
 }
 
-/// The app's private `files` directory: an Android process is named after
-/// its package.
+/// The app's private `files` directory, from the system; failing that
+/// guessed, as an Android process is named after its package.
 #[cfg(target_os = "android")]
 fn platform_data_dir() -> PathBuf {
+    match crate::android::files_dir() {
+        Ok(dir) => return dir,
+        Err(e) => log::error!("cannot ask Android for the files directory: {e}"),
+    }
     let package = std::fs::read("/proc/self/cmdline")
         .ok()
         .and_then(|cmdline| android_package(&cmdline))
@@ -129,7 +133,8 @@ impl Services {
     }
 
     pub fn new(db: Database, data_dir: PathBuf) -> Services {
-        Services::with_vault(db, data_dir, keychain::platform(), KdfParams::DEFAULT)
+        let keys = keychain::platform(&data_dir);
+        Services::with_vault(db, data_dir, keys, KdfParams::DEFAULT)
     }
 
     /// Services whose vault keeps its Touch ID key in `keys` and derives

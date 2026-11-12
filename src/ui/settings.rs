@@ -161,11 +161,16 @@ fn vault_section(state: AppState) -> impl IntoElement {
             .into_element(),
         ];
         if services().vault().touch_id_available() {
+            let (title, description) = if is_touch() {
+                ("指纹/面容解锁", "用指纹或面容代替主密码")
+            } else {
+                ("Touch ID 解锁", "用 Touch ID 或系统密码代替主密码")
+            };
             rows.push(
                 row(
                     Icon::Shield,
-                    "Touch ID 解锁",
-                    "用 Touch ID 或系统密码代替主密码",
+                    title,
+                    description,
                     switch_control(
                         move || state.settings.get().vault_touch_id,
                         move |on| {

@@ -9,6 +9,7 @@ use crate::vault::recovery::RecoveryKey;
 use crate::vault::{MIN_PASSWORD_CHARS, VaultError};
 
 use super::super::icons::{Icon, icon};
+use super::super::mobile::biometric;
 use super::super::state::{AppState, DialogKind};
 use super::super::widgets::{Tone, field, muted, text_button};
 use super::recovery::{
@@ -287,7 +288,7 @@ pub fn unlock_view(state: AppState) -> impl IntoElement {
                 .disabled(move || state.vault_busy.get()),
             )
             .child(when(touch_id, move || {
-                text_button("使用 Touch ID", Tone::Plain, move || {
+                text_button(format!("使用{}", biometric()), Tone::Plain, move || {
                     state.vault_unlock_touch_id()
                 })
                 .disabled(move || state.vault_busy.get())

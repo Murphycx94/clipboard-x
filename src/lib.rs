@@ -7,6 +7,8 @@
 //!   app's services.
 //! - `ui`: the NSH components; [`App`] is the root (`nsh.json` `"root"`).
 
+#[cfg(target_os = "android")]
+mod android;
 pub mod capture;
 pub mod cloud;
 pub mod db;
