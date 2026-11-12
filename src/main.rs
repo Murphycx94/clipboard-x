@@ -7,20 +7,18 @@
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(not(target_os = "android"))]
 use std::process::ExitCode;
 
-use clipboardx::services::{data_dir, services};
+#[cfg(not(target_os = "android"))]
+use clipboardx::services::services;
 
 /// The window's size in points.
 const WINDOW_SIZE: (i32, i32) = (420, 600);
 
+#[cfg(not(target_os = "android"))]
 fn main() -> ExitCode {
-    let dir = data_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("cannot create {}: {e}", dir.display());
-    }
-    clipboardx::logger::init(&dir);
-    log::info!("ClipboardX {} starting", env!("CARGO_PKG_VERSION"));
+    clipboardx::startup();
     services().start_capture();
     services().start_sync_worker();
     run()
@@ -49,5 +47,15 @@ fn run() -> ExitCode {
     )
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-compile_error!("ClipboardX runs on macOS, Windows and Linux.");
+/// Android runs no executable of ours: NSH's host mounts the `App` of the
+/// library (`nsh.json` `"root"`).
+#[cfg(target_os = "android")]
+fn main() {}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "android"
+)))]
+compile_error!("ClipboardX runs on macOS, Windows, Linux and Android.");

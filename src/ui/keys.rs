@@ -17,10 +17,12 @@ use super::state::{AppState, Page, Tab};
 const ALWAYS: KeyOptions = KeyOptions {
     when: When::Always,
     repeat: false,
+    pass_through: false,
 };
 const REPEATING: KeyOptions = KeyOptions {
     when: When::Always,
     repeat: true,
+    pass_through: false,
 };
 
 pub fn bind(state: AppState) {

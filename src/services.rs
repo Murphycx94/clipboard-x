@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::capture;
 use crate::db::Database;
@@ -36,8 +36,11 @@ pub struct Services {
     data_dir: PathBuf,
     data_version: Arc<AtomicU64>,
     shown: AtomicU64,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     capture_started: AtomicBool,
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     stop_capture: Arc<AtomicBool>,
+    recorder: Mutex<capture::Recorder>,
     host: OnceLock<Box<dyn WindowHost>>,
     vault: VaultService,
     sync: crate::cloud::Worker,
@@ -57,9 +60,35 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
+    platform_data_dir()
+}
+
+#[cfg(not(target_os = "android"))]
+fn platform_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(APP_ID)
+}
+
+/// The app's private `files` directory: an Android process is named after
+/// its package.
+#[cfg(target_os = "android")]
+fn platform_data_dir() -> PathBuf {
+    let package = std::fs::read("/proc/self/cmdline")
+        .ok()
+        .and_then(|cmdline| android_package(&cmdline))
+        .unwrap_or_else(|| APP_ID.to_owned());
+    PathBuf::from("/data/data").join(package).join("files")
+}
+
+/// The package of an Android process's `cmdline`: its first argument, up
+/// to a `:` (a process of the app's other than its main one).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_package(cmdline: &[u8]) -> Option<String> {
+    let first = cmdline.split(|&b| b == 0).next()?;
+    let name = std::str::from_utf8(first).ok()?;
+    let package = name.split(':').next()?.trim();
+    (!package.is_empty() && !package.contains('/')).then(|| package.to_owned())
 }
 
 impl Services {
@@ -120,6 +149,7 @@ impl Services {
             shown: AtomicU64::new(0),
             capture_started: AtomicBool::new(false),
             stop_capture: Arc::new(AtomicBool::new(false)),
+            recorder: Mutex::new(capture::Recorder::new()),
             host: OnceLock::new(),
             sync: crate::cloud::Worker::default(),
         }
@@ -175,12 +205,19 @@ impl Services {
     }
 
     /// Saves `hotkey` and registers it with the host when there is one.
+    #[cfg(not(target_os = "android"))]
     pub fn set_hotkey(&self, hotkey: &str) -> Result<(), String> {
         crate::hotkey::parse(hotkey)?;
         if let Some(host) = self.host.get() {
             host.set_hotkey(hotkey)?;
         }
         self.db.set_hotkey(hotkey).map_err(|e| e.to_string())
+    }
+
+    /// Android has no global shortcuts.
+    #[cfg(target_os = "android")]
+    pub fn set_hotkey(&self, _hotkey: &str) -> Result<(), String> {
+        Err("安卓不支持全局快捷键".to_owned())
     }
 
     // --- The vault ----------------------------------------------------------
@@ -227,17 +264,37 @@ impl Services {
     // --- Capture ----------------------------------------------------------
 
     /// Starts watching the clipboard, once; not when `$CLIPBOARDX_NO_CAPTURE`
-    /// is set.
+    /// is set. On Android nothing watches it: the UI reads it when the app
+    /// comes forward and hands it to [`Services::record_clipboard`].
     pub fn start_capture(&self) {
-        if std::env::var_os(NO_CAPTURE_ENV).is_some()
-            || self.capture_started.swap(true, Ordering::AcqRel)
-        {
-            return;
+        #[cfg(not(target_os = "android"))]
+        if self.captures() && !self.capture_started.swap(true, Ordering::AcqRel) {
+            let version = self.data_version.clone();
+            capture::spawn_monitor(self.db.clone(), self.stop_capture.clone(), move || {
+                version.fetch_add(1, Ordering::AcqRel);
+            });
         }
-        let version = self.data_version.clone();
-        capture::spawn_monitor(self.db.clone(), self.stop_capture.clone(), move || {
-            version.fetch_add(1, Ordering::AcqRel);
-        });
+    }
+
+    /// Whether the app records the clipboard: not when
+    /// `$CLIPBOARDX_NO_CAPTURE` is set.
+    pub fn captures(&self) -> bool {
+        std::env::var_os(NO_CAPTURE_ENV).is_none()
+    }
+
+    /// Stores what the clipboard holds unless it is what was recorded last
+    /// (or a secret we copied); whether it stored it. The UI tells when the
+    /// item list changed.
+    pub fn record_clipboard(&self, captured: &capture::Captured) -> Result<bool, String> {
+        let mut recorder = self
+            .recorder
+            .lock()
+            .map_err(|_| "剪贴板记录器不可用".to_owned())?;
+        let stored = recorder.observe(&self.db, captured)?;
+        if stored {
+            self.notify_changed();
+        }
+        Ok(stored)
     }
 
     pub fn copy_item(&self, id: i64) -> Result<(), String> {
@@ -349,9 +406,35 @@ impl Drop for Services {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use super::*;
+
+    #[test]
+    fn android_package_is_the_process_name_up_to_a_colon() {
+        assert_eq!(
+            android_package(b"com.clipboardx.app\0").as_deref(),
+            Some("com.clipboardx.app")
+        );
+        assert_eq!(
+            android_package(b"com.clipboardx.app:sync\0x\0").as_deref(),
+            Some("com.clipboardx.app")
+        );
+        assert_eq!(android_package(b"/system/bin/app_process\0"), None);
+        assert_eq!(android_package(b""), None);
+    }
+
+    #[test]
+    fn recording_the_clipboard_stores_new_text_and_notifies() {
+        let s = services();
+        let before = s.data_version();
+        let text = capture::Captured::Text("from the foreground".into());
+        assert!(s.record_clipboard(&text).unwrap());
+        assert!(s.data_version() > before);
+        // The same content again, as when the app comes forward twice.
+        let after = s.data_version();
+        assert!(!s.record_clipboard(&text).unwrap());
+        assert_eq!(s.data_version(), after);
+        assert_eq!(s.db().today_items().unwrap().len(), 1);
+    }
 
     fn services() -> Services {
         Services::with_vault(
