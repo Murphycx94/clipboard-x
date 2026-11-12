@@ -5,8 +5,9 @@ use nsh_core::prelude::*;
 
 use super::icons::{Icon, icon};
 use super::item_row::{RowPlace, item_row};
-use super::state::{AppState, Tab};
-use super::widgets::{empty_state, field, hint, muted, segmented};
+use super::mobile::is_touch;
+use super::state::{AppState, Page, Tab};
+use super::widgets::{empty_state, field, hint, icon_button, muted, segmented};
 
 pub fn main_panel(state: AppState) -> impl IntoElement {
     view()
@@ -16,7 +17,11 @@ pub fn main_panel(state: AppState) -> impl IntoElement {
         .child(list(state))
 }
 
+/// The history/favorites switch (desktops: on a phone the system tab bar
+/// switches) and the search; on a phone the archive's button by the
+/// history's.
 fn toolbar(state: AppState) -> impl IntoElement {
+    let touch = is_touch();
     view()
         .flex_row()
         .items_center()
@@ -25,15 +30,28 @@ fn toolbar(state: AppState) -> impl IntoElement {
         .py(px(10.0))
         .border_b_1()
         .border_color(move || theme().border)
-        .child(segmented(
-            vec![(Tab::History, "今日历史"), (Tab::Favorites, "收藏夹")],
-            move || state.tab.get(),
-            move |tab| state.set_tab(tab),
+        .child(when(
+            move || !touch,
+            move || {
+                segmented(
+                    vec![(Tab::History, "今日历史"), (Tab::Favorites, "收藏夹")],
+                    move || state.tab.get(),
+                    move |tab| state.set_tab(tab),
+                )
+            },
         ))
-        .child(search_field(state))
+        .child(search_field(state, touch))
+        .child(when(
+            move || touch && state.tab.get() == Tab::History,
+            move || {
+                icon_button(Icon::Archive, "历史归档", muted, move || {
+                    state.page.set(Page::Archive)
+                })
+            },
+        ))
 }
 
-fn search_field(state: AppState) -> impl IntoElement {
+fn search_field(state: AppState, touch: bool) -> impl IntoElement {
     let images_only = move || state.images_only.get();
     view()
         .flex_1()
@@ -54,7 +72,8 @@ fn search_field(state: AppState) -> impl IntoElement {
                 .placeholder("搜索…")
                 .return_key_type(ReturnKeyType::Search)
                 .submit_behavior(SubmitBehavior::Submit)
-                .auto_focus(true),
+                // A phone keeps its keyboard down until the user asks.
+                .auto_focus(!touch),
         )
         .child(
             view()
@@ -132,7 +151,11 @@ fn list(state: AppState) -> impl IntoElement {
         let searching = !state.query.with(|q| q.trim().is_empty()) || state.images_only.get();
         match (searching, state.tab.get()) {
             (true, _) => "无匹配内容".to_owned(),
+            (false, Tab::History) if is_touch() => {
+                "今日暂无复制记录\n在其他 App 复制后回到 ClipboardX 即会记录".to_owned()
+            }
             (false, Tab::History) => "今日暂无复制记录".to_owned(),
+            (false, Tab::Favorites) if is_touch() => "暂无收藏，长按条目选择「收藏」".to_owned(),
             (false, Tab::Favorites) => "暂无收藏，悬停条目点击 ☆ 添加".to_owned(),
         }
     };

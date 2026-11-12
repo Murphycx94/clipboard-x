@@ -2,11 +2,13 @@
 
 mod archive;
 mod dialogs;
+mod foreground;
 mod header;
 mod icons;
 mod item_row;
 mod keys;
 mod main_panel;
+mod mobile;
 mod settings;
 mod state;
 mod vault;
@@ -22,19 +24,33 @@ pub use state::{AppState, Page};
 /// The application's root component.
 #[component]
 pub fn App() -> impl IntoElement {
+    crate::startup();
     let state = AppState::new();
-    services().start_capture();
+    let touch = mobile::is_touch();
+    if touch {
+        foreground::follow_lifecycle();
+    } else {
+        services().start_capture();
+        keys::bind(state);
+    }
     services().start_sync_worker();
     state.reload();
     state.apply_theme();
     state.watch_services();
-    keys::bind(state);
 
     let page_is = move |page: Page| move || state.page.get() == page;
     view()
         .flex_1()
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
+        // Phones: below the status bar.
+        .pt(move || {
+            if touch {
+                Length::from(safe_area().top)
+            } else {
+                Length::from(px(0.0))
+            }
+        })
         .child(header::header(state))
         .child(
             view()
@@ -51,7 +67,8 @@ pub fn App() -> impl IntoElement {
                 }))
                 .child(when(page_is(Page::Vault), move || vault::vault_page(state))),
         )
-        .child(keys::list_keys(state))
+        .child(when(move || !touch, move || keys::list_keys(state)))
+        .child(when(move || touch, move || mobile::tab_bar(state)))
         .child(widgets::toast_layer(state))
         .child(dialogs::dialogs(state))
 }
