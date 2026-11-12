@@ -15,6 +15,16 @@ pub fn is_touch() -> bool {
     matches!(os(), Os::Android | Os::Ios)
 }
 
+/// What the system's confirmation of the user is called in the UI: Touch ID
+/// on the Mac, the fingerprint or face on a phone.
+pub fn biometric() -> &'static str {
+    if is_touch() {
+        "指纹/面容"
+    } else {
+        "Touch ID"
+    }
+}
+
 /// What each tab of the bar shows, in order.
 const TABS: [MobileTab; 4] = [
     MobileTab::History,

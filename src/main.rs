@@ -14,6 +14,7 @@ use std::process::ExitCode;
 use clipboardx::services::services;
 
 /// The window's size in points.
+#[cfg(not(target_os = "android"))]
 const WINDOW_SIZE: (i32, i32) = (420, 600);
 
 #[cfg(not(target_os = "android"))]
