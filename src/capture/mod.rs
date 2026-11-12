@@ -1,11 +1,25 @@
 //! Watching the system clipboard and putting items back on it.
+//!
+//! What every platform shares lives here: hashing, deduplicating against
+//! what was seen last ([`Recorder`]), storing, thumbnails and leaving our
+//! own secret copies out. Reading and writing the clipboard is the
+//! platform's: `desktop` polls it on a thread of its own (`arboard`); a
+//! phone reads it when the app comes to the foreground
+//! ([`read_foreground`], NSH's clipboard on the UI thread) and `android`
+//! writes it.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
 use std::time::Duration;
 
-use arboard::Clipboard;
+#[cfg(not(target_os = "android"))]
+mod desktop;
+#[cfg(not(target_os = "android"))]
+pub use desktop::{copy_item, copy_secret, spawn_monitor};
+
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+pub use android::{copy_item, copy_secret};
+
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use sha2::{Digest, Sha256};
@@ -54,12 +68,6 @@ impl Captured {
 /// How long a copied secret stays on the clipboard.
 pub const SECRET_LIFETIME: Duration = Duration::from_secs(30);
 
-/// Pasteboard types other apps set on secrets (nspasteboard.org).
-const SKIP_TYPES: [&str; 2] = [
-    "org.nspasteboard.ConcealedType",
-    "org.nspasteboard.TransientType",
-];
-
 /// The hash of the secret copied last and when, which the monitor does not
 /// record while it is on the clipboard.
 static LAST_SECRET: std::sync::Mutex<Option<(String, std::time::Instant)>> =
@@ -67,10 +75,6 @@ static LAST_SECRET: std::sync::Mutex<Option<(String, std::time::Instant)>> =
 
 /// Counts secret copies: only the latest one's timer clears the clipboard.
 static SECRET_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub(crate) fn is_concealed_types<S: AsRef<str>>(types: &[S]) -> bool {
-    types.iter().any(|t| SKIP_TYPES.contains(&t.as_ref()))
-}
 
 fn remember_secret(text: &str) {
     if let Ok(mut last) = LAST_SECRET.lock() {
@@ -88,144 +92,60 @@ fn is_recent_secret(hash: &str) -> bool {
     })
 }
 
-/// Whether the clipboard holds a secret another app marked (macOS).
-#[cfg(target_os = "macos")]
-fn clipboard_is_concealed() -> bool {
-    use objc2_app_kit::NSPasteboard;
-    let types = NSPasteboard::generalPasteboard().types();
-    let names: Vec<String> = types
-        .map(|t| t.iter().map(|s| s.to_string()).collect())
-        .unwrap_or_default();
-    is_concealed_types(&names)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn clipboard_is_concealed() -> bool {
-    false
-}
-
-/// Copies `text` marked as a secret (left out of clipboard histories) and
-/// clears it after [`SECRET_LIFETIME`] unless something else was copied.
-pub fn copy_secret(text: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    use arboard::SetExtApple as _;
-    #[cfg(target_os = "linux")]
-    use arboard::SetExtLinux as _;
-    #[cfg(target_os = "windows")]
-    use arboard::SetExtWindows as _;
+/// Starts a secret copy of `text`: remembers it so the history leaves it
+/// out, and gives the copy's number, which [`is_latest_secret_copy`]
+/// checks before clearing the clipboard.
+pub(crate) fn begin_secret_copy(text: &str) -> u64 {
     remember_secret(text);
-    let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
-    clipboard
-        .set()
-        .exclude_from_history()
-        .text(text.to_owned())
-        .map_err(|e| e.to_string())?;
-    let hash = hash_bytes(text.as_bytes());
-    let copy = SECRET_COPIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    thread::Builder::new()
-        .name("secret-clear".into())
-        .spawn(move || {
-            thread::sleep(SECRET_LIFETIME);
-            // A later secret copy has a timer of its own.
-            if SECRET_COPIES.load(std::sync::atomic::Ordering::SeqCst) != copy {
-                return;
-            }
-            if let Ok(mut clipboard) = Clipboard::new()
-                && clipboard
-                    .get_text()
-                    .map(zeroize::Zeroizing::new)
-                    .is_ok_and(|t| hash_bytes(t.as_bytes()) == hash)
-            {
-                let _ = clipboard.clear();
-            }
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    SECRET_COPIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
-/// Reads the clipboard: non-blank text first, then an image; nothing when
-/// it holds a secret.
-fn read(clipboard: &mut Clipboard) -> Option<Captured> {
-    if clipboard_is_concealed() {
-        return None;
+/// Whether secret copy `copy` is the latest: an older one's timer leaves
+/// the clipboard alone.
+#[cfg_attr(target_os = "android", allow(dead_code))] // The Android host clears it (step 4).
+pub(crate) fn is_latest_secret_copy(copy: u64) -> bool {
+    SECRET_COPIES.load(std::sync::atomic::Ordering::SeqCst) == copy
+}
+
+/// Turns what the clipboard holds into history items: stores what differs
+/// from what it saw last, except secrets we copied ourselves.
+#[derive(Debug, Default)]
+pub struct Recorder {
+    last_hash: String,
+}
+
+impl Recorder {
+    pub fn new() -> Recorder {
+        Recorder::default()
     }
-    if let Ok(text) = clipboard.get_text()
-        && !text.trim().is_empty()
-    {
-        return Some(Captured::Text(text));
-    }
-    let image = clipboard.get_image().ok()?;
-    RgbaImage::from_raw(
-        u32::try_from(image.width).ok()?,
-        u32::try_from(image.height).ok()?,
-        image.bytes.into_owned(),
-    )
-    .map(Captured::Image)
-}
 
-/// Polls the clipboard on a thread of its own, storing what changes and
-/// calling `on_change` after each store, until `stop` is set.
-pub fn spawn_monitor(
-    db: Arc<Database>,
-    stop: Arc<AtomicBool>,
-    on_change: impl Fn() + Send + 'static,
-) -> thread::JoinHandle<()> {
-    thread::Builder::new()
-        .name("clipboard-monitor".into())
-        .spawn(move || {
-            let mut clipboard = match Clipboard::new() {
-                Ok(clipboard) => clipboard,
-                Err(e) => {
-                    log::error!("cannot open the clipboard: {e}");
-                    return;
-                }
-            };
-            let mut last_hash = String::new();
-            while !stop.load(Ordering::Relaxed) {
-                thread::sleep(POLL_INTERVAL);
-                let Some(captured) = read(&mut clipboard) else {
-                    continue;
-                };
-                let hash = captured.hash();
-                if hash == last_hash {
-                    continue;
-                }
-                if is_recent_secret(&hash) {
-                    last_hash = hash;
-                    continue;
-                }
-                match captured.store(&db, &hash) {
-                    Ok(()) => on_change(),
-                    Err(e) => log::error!("cannot store a clipboard item: {e}"),
-                }
-                last_hash = hash;
-            }
-        })
-        .unwrap_or_else(|e| panic!("cannot start the clipboard monitor thread: {e}"))
-}
-
-/// Puts item `id` back on the system clipboard.
-pub fn copy_item(db: &Database, id: i64) -> Result<(), String> {
-    let content = db
-        .item_content(id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "该条目已不存在".to_owned())?;
-    let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
-    match content {
-        ItemContent::Text(text) => clipboard.set_text(text).map_err(|e| e.to_string()),
-        ItemContent::Image(png) => {
-            let rgba = image::load_from_memory(&png)
-                .map_err(|e| e.to_string())?
-                .to_rgba8();
-            clipboard
-                .set_image(arboard::ImageData {
-                    width: rgba.width() as usize,
-                    height: rgba.height() as usize,
-                    bytes: rgba.into_raw().into(),
-                })
-                .map_err(|e| e.to_string())
+    /// Stores `captured` unless it is what was seen last or a secret we
+    /// copied; whether it stored it.
+    pub fn observe(&mut self, db: &Database, captured: &Captured) -> Result<bool, String> {
+        let hash = captured.hash();
+        if hash == self.last_hash {
+            return Ok(false);
         }
+        let is_secret = is_recent_secret(&hash);
+        // Seen either way: a failed store is not retried on every poll.
+        self.last_hash = hash.clone();
+        if is_secret {
+            return Ok(false);
+        }
+        captured.store(db, &hash).map(|()| true)
     }
+}
+
+/// What the clipboard holds now, read through NSH on the UI thread: its
+/// text, unless blank. Phones read it so, when the app comes forward
+/// (`ui::foreground`); NSH reads no images on Android.
+pub async fn read_foreground() -> Option<Captured> {
+    text_capture(nsh_core::prelude::clipboard_string().await)
+}
+
+/// Non-blank text as a [`Captured`], else nothing.
+pub fn text_capture(text: String) -> Option<Captured> {
+    (!text.trim().is_empty()).then_some(Captured::Text(text))
 }
 
 pub fn hash_bytes(data: &[u8]) -> String {
@@ -308,6 +228,14 @@ pub fn regenerate_thumbnails(db: &Database) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The secret copied last is one slot for the process: tests that set
+    /// it take turns.
+    static SECRET_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn secret_slot() -> std::sync::MutexGuard<'static, ()> {
+        SECRET_SLOT.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn checker(w: u32, h: u32) -> RgbaImage {
         RgbaImage::from_fn(w, h, |x, y| {
@@ -410,25 +338,48 @@ mod tests {
     }
 
     #[test]
-    fn concealed_type_names_are_recognized() {
-        assert!(is_concealed_types(&[
-            "public.utf8-plain-text",
-            "org.nspasteboard.ConcealedType"
-        ]));
-        assert!(is_concealed_types(&["org.nspasteboard.TransientType"]));
-        assert!(!is_concealed_types(&["public.utf8-plain-text"]));
-    }
-
-    #[test]
     fn our_own_secret_copies_are_skipped() {
+        let _slot = secret_slot();
         remember_secret("s3cret");
         assert!(is_recent_secret(&hash_bytes(b"s3cret")));
         assert!(!is_recent_secret(&hash_bytes(b"other")));
     }
 
     #[test]
-    fn copying_a_missing_item_fails() {
+    fn recorder_stores_new_content_once() {
         let db = Database::in_memory().unwrap();
-        assert!(copy_item(&db, 42).is_err());
+        let mut recorder = Recorder::new();
+        let first = Captured::Text("recorder-first".into());
+        assert!(recorder.observe(&db, &first).unwrap());
+        assert!(!recorder.observe(&db, &first).unwrap());
+        let second = Captured::Text("recorder-second".into());
+        assert!(recorder.observe(&db, &second).unwrap());
+        assert_eq!(db.today_items().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn recorder_skips_our_own_secret_copies() {
+        let _slot = secret_slot();
+        let db = Database::in_memory().unwrap();
+        let mut recorder = Recorder::new();
+        begin_secret_copy("recorder-secret");
+        let secret = Captured::Text("recorder-secret".into());
+        assert!(!recorder.observe(&db, &secret).unwrap());
+        assert!(db.today_items().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_the_latest_secret_copy_clears() {
+        let _slot = secret_slot();
+        let older = begin_secret_copy("a");
+        let newer = begin_secret_copy("b");
+        assert!(!is_latest_secret_copy(older));
+        assert!(is_latest_secret_copy(newer));
+    }
+
+    #[test]
+    fn blank_text_is_not_captured() {
+        assert_eq!(text_capture("  \n".into()), None);
+        assert_eq!(text_capture("x".into()), Some(Captured::Text("x".into())));
     }
 }

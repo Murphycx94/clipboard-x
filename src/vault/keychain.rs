@@ -19,6 +19,7 @@ pub enum KeyItem {
 }
 
 impl KeyItem {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // AndroidKeyStore (step 4).
     fn account(self) -> &'static str {
         match self {
             KeyItem::DataKey => "data-key",
