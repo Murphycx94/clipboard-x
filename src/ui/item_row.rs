@@ -1,11 +1,13 @@
-//! One clipboard item in a list: its time, its content and its actions.
+//! One clipboard item in a list: its time, its content and its actions
+//! (shown on hover on the desktops; a long press opens them on a phone).
 
-use nsh_base::theme;
+use nsh_base::{context_menu, menu_item, theme};
 use nsh_core::prelude::*;
 
 use crate::model::{ClipboardItem, ContentType, shortcut_label, time_label};
 
 use super::icons::{Icon, icon};
+use super::mobile::is_touch;
 use super::state::AppState;
 use super::widgets::{copied_color, icon_button, muted, star_color};
 
@@ -28,11 +30,13 @@ pub fn item_row(
         RowPlace::Main(index) => Some(index.get()),
         RowPlace::Archive => None,
     };
-    let focused = move || index().is_some_and(|i| i == state.focused.get());
+    let touch = is_touch();
+    // The keyboard's selection: a phone has none to show.
+    let focused = move || !touch && index().is_some_and(|i| i == state.focused.get());
     let copied = move || state.copied.get() == Some(id());
     let hovered = move || state.hovered.get() == Some(id());
 
-    view()
+    let row = view()
         .flex_row()
         .items_center()
         .gap(px(12.0))
@@ -62,16 +66,64 @@ pub fn item_row(
                 state.hovered.set(None);
             }
         })
-        .child(meta_column(state, item, index))
+        .child(meta_column(state, item, index, touch))
         .child(content(state, item))
-        .child(actions(state, item, copied, hovered))
+        .child(actions(state, item, copied, hovered));
+    if touch {
+        item_menu(state, item, row).into_element()
+    } else {
+        row.into_element()
+    }
 }
 
-/// The time, and the shortcut of the first nine rows.
+/// `row` as the trigger of the item's actions, which a long press opens in
+/// a sheet at the bottom of the screen.
+fn item_menu(
+    state: AppState,
+    item: Memo<Option<ClipboardItem>>,
+    row: impl IntoElement + 'static,
+) -> impl IntoElement {
+    let action = move |label: fn(&ClipboardItem) -> &'static str,
+                       run: fn(AppState, &ClipboardItem)| {
+        menu_item()
+            .px(px(20.0))
+            .py(px(15.0))
+            .on_select(move || {
+                if let Some(i) = item.get() {
+                    run(state, &i);
+                }
+            })
+            .child(
+                text(move || item.with(|i| i.as_ref().map(label).unwrap_or_default()))
+                    .text_base()
+                    .text_color(move || theme().foreground),
+            )
+    };
+    context_menu()
+        .trigger(row)
+        .popup_class("bg-popover rounded-t-2xl pt-2 pb-8")
+        .backdrop_class("bg-black/30")
+        .child(action(|_| "复制", |s, i| s.copy(i.id, false)))
+        .child(action(|_| "备注", |s, i| s.open_note(i)))
+        .child(action(
+            |i| {
+                if i.is_favorite {
+                    "取消收藏"
+                } else {
+                    "收藏"
+                }
+            },
+            |s, i| s.toggle_favorite(i),
+        ))
+        .child(action(|_| "删除", |s, i| s.delete(i.id)))
+}
+
+/// The time, and the shortcut of the first nine rows (desktops).
 fn meta_column(
     _state: AppState,
     item: Memo<Option<ClipboardItem>>,
     index: impl Fn() -> Option<usize> + Copy + 'static,
+    touch: bool,
 ) -> impl IntoElement {
     view()
         .w(px(40.0))
@@ -91,7 +143,7 @@ fn meta_column(
         )
         .child(
             text(move || match index() {
-                Some(i) if i < 9 => shortcut_label(i + 1, apple_keys()),
+                Some(i) if i < 9 && !touch => shortcut_label(i + 1, apple_keys()),
                 _ => String::new(),
             })
             .text_size(px(10.0))
