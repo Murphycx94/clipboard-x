@@ -103,8 +103,10 @@ fn tab_and_enter_work_in_forms_and_lists() {
     type_keys(&mut app, "octo");
     assert_eq!(input(&app, "id:vault-username"), "octo");
     app.press_key("enter").unwrap();
+    // "Example" is in the editor's name field too: wait for the editor to
+    // close before looking for it in the list.
+    app.wait_for_gone("新建账号", common::SLOW).unwrap();
     wait(&mut app, "Example");
-    assert!(!app.shows("新建账号"));
 
     // A multi-line note: Enter is a new line, ⌘↩ saves.
     app.press("新建").unwrap();
