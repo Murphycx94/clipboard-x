@@ -136,9 +136,13 @@ jobs:
       - uses: actions/checkout@v4
 
       # `nsh package` builds the crate for the host too (to describe the
-      # app), and on Linux that is NSH's GTK platform.
-      - name: Install GTK 4 and GStreamer
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      # app): on Linux, NSH's GTK 4 platform and the desktop's tray icon
+      # (GTK 3).
+      - name: Install GTK and GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libgtk-3-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       # The bridge (android/java) is compiled by build.rs with javac; the
       # runner's Android SDK has the platform, build-tools (d8) and NDK.
