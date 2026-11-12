@@ -11,11 +11,10 @@ use crate::vault::account_key::AccountKey;
 use crate::vault::{VaultError, VaultStatus};
 
 use super::super::icons::Icon;
+use super::super::mobile::device_name;
 use super::super::settings::{row, section};
 use super::super::state::{AppState, DialogKind, Page, SyncForm, SyncMode, VaultPurpose};
 use super::super::widgets::{Tone, field, modal, muted, text_button};
-
-const DEFAULT_DEVICE_NAME: &str = "我的 Mac";
 
 fn no_client() -> VaultError {
     VaultError::Sync("未开启同步".into())
@@ -420,7 +419,7 @@ fn setup_dialog(state: AppState) -> impl IntoElement {
     let mode = untracked(move || state.sync_mode.get());
     let url = signal(String::new());
     let code = signal(String::new());
-    let name = signal(DEFAULT_DEVICE_NAME.to_owned());
+    let name = signal(device_name().to_owned());
     let code_field = element_ref();
     let name_field = element_ref();
     let next = move || {
@@ -466,7 +465,7 @@ fn setup_dialog(state: AppState) -> impl IntoElement {
         )
         .child(
             view().gap(px(4.0)).child(label("设备名称")).child(
-                input(name, "sync-device", DEFAULT_DEVICE_NAME)
+                input(name, "sync-device", device_name())
                     .element_ref(&name_field)
                     .on_submit(move |_: &str| next()),
             ),
