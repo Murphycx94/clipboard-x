@@ -200,6 +200,8 @@ pub fn modal(
         .animation(ModalAnimation::Fade)
         .on_cancel(close)
         .flex_1()
+        // Centered in what the software keyboard leaves of the window.
+        .pb(move || px(keyboard_height().0))
         .child(
             view()
                 .absolute()

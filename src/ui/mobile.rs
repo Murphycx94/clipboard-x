@@ -25,6 +25,20 @@ pub fn biometric() -> &'static str {
     }
 }
 
+/// What this device is called when it joins sync, until the user renames it.
+pub fn device_name() -> &'static str {
+    device_name_on(os())
+}
+
+fn device_name_on(os: Os) -> &'static str {
+    match os {
+        Os::Android => "我的手机",
+        Os::Ios => "我的 iPhone",
+        Os::MacOs => "我的 Mac",
+        Os::Windows | Os::Linux | Os::Web => "我的电脑",
+    }
+}
+
 /// What each tab of the bar shows, in order.
 const TABS: [MobileTab; 4] = [
     MobileTab::History,
@@ -118,5 +132,13 @@ mod tests {
             MobileTab::of(Page::Main, Tab::Favorites),
             MobileTab::Favorites
         );
+    }
+
+    #[test]
+    fn a_new_device_is_named_after_what_it_is() {
+        assert_eq!(device_name_on(Os::Android), "我的手机");
+        assert_eq!(device_name_on(Os::Ios), "我的 iPhone");
+        assert_eq!(device_name_on(Os::MacOs), "我的 Mac");
+        assert_eq!(device_name_on(Os::Windows), "我的电脑");
     }
 }
