@@ -8,6 +8,7 @@ use crate::services::services;
 use crate::vault::VaultStatus;
 
 use super::icons::{Icon, icon};
+use super::mobile::is_touch;
 use super::state::{AppState, DialogKind, Page, VaultPurpose};
 use super::widgets::{Tone, field, muted, segmented, text_button};
 
@@ -17,36 +18,7 @@ pub fn settings_page(state: AppState) -> impl IntoElement {
             .px(px(14.0))
             .py(px(14.0))
             .gap(px(14.0))
-            .child(section(
-                "常规",
-                vec![
-                    hotkey_row(state).into_element(),
-                    row(
-                        Icon::Eye,
-                        "失焦自动隐藏",
-                        "切换到其他应用时自动收起窗口",
-                        switch_control(
-                            move || state.settings.get().hide_on_blur,
-                            move |on| state.set_hide_on_blur(on),
-                        ),
-                    )
-                    .into_element(),
-                    row(
-                        Icon::Contrast,
-                        "外观主题",
-                        "选择界面显示模式",
-                        segmented(
-                            ThemePreference::ALL
-                                .iter()
-                                .map(|t| (*t, t.label()))
-                                .collect(),
-                            move || state.settings.get().theme,
-                            move |theme| state.set_theme(theme),
-                        ),
-                    )
-                    .into_element(),
-                ],
-            ))
+            .child(section("常规", general_rows(state)))
             .child(section(
                 "数据",
                 vec![
@@ -117,6 +89,42 @@ pub fn settings_page(state: AppState) -> impl IntoElement {
     )
 }
 
+/// The shortcut and hiding on blur (desktops: a phone has neither), and
+/// the appearance.
+fn general_rows(state: AppState) -> Vec<AnyElement> {
+    let appearance = row(
+        Icon::Contrast,
+        "外观主题",
+        "选择界面显示模式",
+        segmented(
+            ThemePreference::ALL
+                .iter()
+                .map(|t| (*t, t.label()))
+                .collect(),
+            move || state.settings.get().theme,
+            move |theme| state.set_theme(theme),
+        ),
+    )
+    .into_element();
+    if is_touch() {
+        return vec![appearance];
+    }
+    vec![
+        hotkey_row(state).into_element(),
+        row(
+            Icon::Eye,
+            "失焦自动隐藏",
+            "切换到其他应用时自动收起窗口",
+            switch_control(
+                move || state.settings.get().hide_on_blur,
+                move |on| state.set_hide_on_blur(on),
+            ),
+        )
+        .into_element(),
+        appearance,
+    ]
+}
+
 /// The vault's settings; a link to the vault page until it is set up.
 fn vault_section(state: AppState) -> impl IntoElement {
     let set_up = move || state.vault_status.get() != VaultStatus::NotSetUp;
@@ -135,8 +143,16 @@ fn vault_section(state: AppState) -> impl IntoElement {
             .into_element(),
             row(
                 Icon::EyeOff,
-                "收起面板时锁定",
-                "系统睡眠或锁屏时总会锁定",
+                if is_touch() {
+                    "切到后台时锁定"
+                } else {
+                    "收起面板时锁定"
+                },
+                if is_touch() {
+                    "离开 ClipboardX 时立即锁定密码本"
+                } else {
+                    "系统睡眠或锁屏时总会锁定"
+                },
                 switch_control(
                     move || state.settings.get().vault_lock_on_hide,
                     move |on| state.set_vault_lock_on_hide(on),
