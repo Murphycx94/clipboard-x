@@ -7,9 +7,9 @@
 - 同步服务器只监听本机 `127.0.0.1:8787`。
 - 前面是 Caddy，负责三件事：
   - 在域名上提供 HTTPS，证书由 Let's Encrypt 签发，通过阿里云 DNS 验证，不需要开放 80/443；
-  - 把家里的公网 IPv4 及时更新到域名的 A 记录（DDNS）；
+  - 把家里的公网 IPv4 和容器自己的 IPv6 及时更新到域名的 A、AAAA 记录（DDNS）；
   - 把请求转给同步服务器。
-- 路由器把一个端口（例如 8443）转发到容器。
+- 路由器把一个端口（例如 8443）的 IPv4 转发到容器，并放行到容器 IPv6 的同一端口。
 
 客户端填的地址形如 `https://sync.example.com:8443`。
 
@@ -29,6 +29,11 @@
 - 模板：Debian 13（`debian-13-standard`）。选无特权容器，勾选"嵌套"（nesting）。
 - 资源：1 核、512 MB 内存、4 GB 磁盘就足够。
 - 网络：接在局域网网桥上。建议在路由器里给它固定一个地址，端口转发要指向这个地址。
+- DNS：DDNS 查容器自己的 IPv6 时，需要 DNS 能返回 AAAA 记录。iStoreOS 等路由器常默认过滤 AAAA，所以要让容器直接用公共 DNS。在容器的 `/etc/dhcp/dhclient.conf` 末尾加一行，然后重启容器：
+
+  ```
+  supersede domain-name-servers 223.5.5.5, 223.6.6.6;
+  ```
 
 国内下载官方模板很慢时，可以在宿主机上从镜像下载到 `/var/lib/vz/template/cache/`，再按 PVE 列出的 sha512 校验。镜像地址例如 `https://mirrors.tuna.tsinghua.edu.cn/proxmox/images/system/`。
 
@@ -73,11 +78,17 @@ journalctl -u clipboardx-caddy -f
 journalctl -u clipboardx-sync | grep 'admin code'
 ```
 
-## 3. 路由器端口转发
+## 3. 路由器
 
-在路由器上添加一条端口转发：外部 TCP `8443`（即 `SYNC_PORT`）→ 容器地址的 `8443`。
+家用宽带一般封了入站的 80/443，所以用别的端口。OpenWrt / iStoreOS 上要配两条规则：
 
-在 OpenWrt / iStoreOS 上的位置是"网络 › 防火墙 › 端口转发"。家用宽带一般封了入站的 80/443，所以用别的端口。
+- **IPv4 端口转发**：在"网络 › 防火墙 › 端口转发"里，把外部 TCP `8443`（即 `SYNC_PORT`）转发到容器地址的 `8443`。
+- **IPv6 放行**：IPv6 不需要转发，但路由器默认拦截从外网进来的连接。在"网络 › 防火墙 › 通信规则"里加一条：
+  - 协议 TCP，来源区域 `wan`，目标区域 `lan`；
+  - 目标端口 `8443`；
+  - 目标地址填容器 IPv6 的后半段加掩码，例如 `::be24:11ff:fe62:3e62/::ffff:ffff:ffff:ffff`。
+
+  这样运营商换了前缀，规则依然有效。容器 IPv6 的后半段由网卡 MAC 生成，可以用 `ip -6 addr show dev eth0 scope global` 查看。
 
 转发配好后，在手机上关掉 Wi-Fi、用移动网络打开 `https://sync.example.com:8443/`。能连上就说明外网可以访问；返回 404 是正常的，因为服务只响应 API 路径。
 

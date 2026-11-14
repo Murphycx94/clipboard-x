@@ -1,5 +1,5 @@
 # /etc/clipboardx-sync/Caddyfile — HTTPS in front of the sync server, and
-# the domain kept on the home's public IPv4 (DDNS). The values come from
+# the domain kept on the home's public addresses (DDNS). The values come from
 # /etc/clipboardx-sync/caddy.env (see caddy.env.example).
 {
 	# Restarted, never reloaded: no admin endpoint.
@@ -22,11 +22,11 @@
 		domains {
 			{$SYNC_ZONE} {$SYNC_NAME}
 		}
-		# The router forwards IPv4 only.
-		versions ipv4
-		ip_source simple_http https://4.ipw.cn
-		ip_source simple_http https://api.ipify.org
-		ip_source simple_http https://icanhazip.com
+		# The home's IPv4 (the router forwards the port to this machine)
+		# and this machine's own IPv6 (the router lets the port through):
+		# the default IP source asks public services over each. Needs a
+		# DNS server that returns AAAA records (see README.md).
+		versions ipv4 ipv6
 		check_interval 5m
 		# Alibaba Cloud DNS's shortest TTL on the free plan.
 		ttl 10m
