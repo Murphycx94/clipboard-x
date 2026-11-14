@@ -225,12 +225,25 @@ jobs:
       - name: Build
         run: cargo build --release -p clipboardx-sync-server --target x86_64-unknown-linux-musl
 
+      # Caddy with the Alibaba Cloud DNS and dynamic DNS modules, pinned
+      # in the script: HTTPS and DDNS in front of the server.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build Caddy
+        run: |
+          mkdir -p "dist/$NAME"
+          server/deploy/build-caddy.sh "$PWD/dist/$NAME/caddy"
+
       - name: Package with the deploy kit
         run: |
           mkdir -p "dist/$NAME"
           cp target/x86_64-unknown-linux-musl/release/clipboardx-sync-server "dist/$NAME/"
           cp server/deploy/install.sh server/deploy/clipboardx-sync.service \
-            server/deploy/clipboardx-sync.env.example server/deploy/README.md "dist/$NAME/"
+            server/deploy/clipboardx-sync.env.example server/deploy/Caddyfile \
+            server/deploy/caddy.env.example server/deploy/clipboardx-caddy.service \
+            server/deploy/README.md "dist/$NAME/"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
 

@@ -1,0 +1,38 @@
+# /etc/clipboardx-sync/Caddyfile — HTTPS in front of the sync server, and
+# the domain kept on the home's public IPv4 (DDNS). The values come from
+# /etc/clipboardx-sync/caddy.env (see caddy.env.example).
+{
+	# Restarted, never reloaded: no admin endpoint.
+	admin off
+	# Nothing listens on 80 (home ISPs block it anyway).
+	auto_https disable_redirects
+
+	# Certificates from Let's Encrypt by DNS challenge: no inbound port
+	# has to answer it.
+	acme_dns alidns {
+		access_key_id {env.ALIYUN_ACCESS_KEY_ID}
+		access_key_secret {env.ALIYUN_ACCESS_KEY_SECRET}
+	}
+
+	dynamic_dns {
+		provider alidns {
+			access_key_id {env.ALIYUN_ACCESS_KEY_ID}
+			access_key_secret {env.ALIYUN_ACCESS_KEY_SECRET}
+		}
+		domains {
+			{$SYNC_ZONE} {$SYNC_NAME}
+		}
+		# The router forwards IPv4 only.
+		versions ipv4
+		ip_source simple_http https://4.ipw.cn
+		ip_source simple_http https://api.ipify.org
+		ip_source simple_http https://icanhazip.com
+		check_interval 5m
+		# Alibaba Cloud DNS's shortest TTL on the free plan.
+		ttl 10m
+	}
+}
+
+{$SYNC_NAME}.{$SYNC_ZONE}:{$SYNC_PORT} {
+	reverse_proxy 127.0.0.1:8787
+}
