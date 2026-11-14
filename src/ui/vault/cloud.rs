@@ -447,14 +447,11 @@ fn setup_dialog(state: AppState) -> impl IntoElement {
         .gap(px(10.0))
         .child(text(note).text_xs().text_color(muted))
         .child(
-            view()
-                .gap(px(4.0))
-                .child(label("服务器地址（Tailscale）"))
-                .child(
-                    input(url, "sync-url", "http://100.x.x.x:8787")
-                        .on_submit(move |_: &str| code_field.focus())
-                        .auto_focus(true),
-                ),
+            view().gap(px(4.0)).child(label("服务器地址")).child(
+                input(url, "sync-url", "https://sync.example.com:8443")
+                    .on_submit(move |_: &str| code_field.focus())
+                    .auto_focus(true),
+            ),
         )
         .child(
             view().gap(px(4.0)).child(label(code_label)).child(
