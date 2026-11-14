@@ -29,6 +29,10 @@ pub fn App() -> impl IntoElement {
     let touch = mobile::is_touch();
     if touch {
         foreground::follow_lifecycle();
+        // No desktop host here to do it for its window.
+        if let Err(e) = services().apply_capture_protection() {
+            log::error!("cannot hide the window from screen captures: {e}");
+        }
     } else {
         services().start_capture();
         keys::bind(state);
