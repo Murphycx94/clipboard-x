@@ -24,8 +24,8 @@ use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
     NSFloatingWindowLevel, NSMenu, NSMenuItem, NSPanel, NSScreen, NSView, NSWindowButton,
-    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
-    NSWorkspace, NSWorkspaceScreensDidSleepNotification,
+    NSWindowCollectionBehavior, NSWindowDelegate, NSWindowSharingType, NSWindowStyleMask,
+    NSWindowTitleVisibility, NSWorkspace, NSWorkspaceScreensDidSleepNotification,
     NSWorkspaceSessionDidResignActiveNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
@@ -95,6 +95,10 @@ impl WindowHost for MacHost {
         with_host(move |host| host.register_hotkey(parsed));
         Ok(())
     }
+
+    fn set_hidden_from_capture(&self, hidden: bool) {
+        with_host(move |host| host.set_hidden_from_capture(hidden));
+    }
 }
 
 define_class!(
@@ -154,6 +158,16 @@ impl Host {
         } else {
             self.show();
         }
+    }
+
+    /// Keeps the panel out of what other apps read of the screen
+    /// (screenshots, recordings, screen sharing), or lets them read it.
+    fn set_hidden_from_capture(&self, hidden: bool) {
+        self.panel.setSharingType(if hidden {
+            NSWindowSharingType::None
+        } else {
+            NSWindowSharingType::ReadOnly
+        });
     }
 
     /// Places the panel at the right edge of the screen the mouse is on,
@@ -454,6 +468,10 @@ pub fn run(size: (i32, i32)) -> ExitCode {
         });
     });
     services().set_host(Box::new(MacHost));
+    // Posted before the panel can show.
+    if let Err(e) = services().apply_capture_protection() {
+        log::error!("cannot hide the panel from screen captures: {e}");
+    }
     listen_to_events();
 
     // The menu-bar icon and the shortcut once the event loop runs.

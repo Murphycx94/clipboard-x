@@ -44,6 +44,7 @@ mod key {
     pub const TELEGRAM_CHAT_ID: &str = "telegram_chat_id";
     pub const THEME: &str = "theme";
     pub const HIDE_ON_BLUR: &str = "hide_on_blur";
+    pub const HIDE_FROM_CAPTURE: &str = "hide_from_capture";
     pub const THUMBNAIL_VERSION: &str = "thumbnail_version";
     pub const VAULT_LOCK_MINUTES: &str = "vault_lock_minutes";
     pub const VAULT_LOCK_ON_HIDE: &str = "vault_lock_on_hide";
@@ -85,6 +86,10 @@ impl Database {
             (key::TELEGRAM_CHAT_ID, String::new()),
             (key::THEME, defaults.theme.as_str().to_owned()),
             (key::HIDE_ON_BLUR, defaults.hide_on_blur.to_string()),
+            (
+                key::HIDE_FROM_CAPTURE,
+                defaults.hide_from_capture.to_string(),
+            ),
             (
                 key::VAULT_LOCK_MINUTES,
                 defaults.vault_lock_minutes.to_string(),
@@ -381,6 +386,10 @@ impl Database {
                 .setting(key::HIDE_ON_BLUR)?
                 .map(|v| v != "false")
                 .unwrap_or(defaults.hide_on_blur),
+            hide_from_capture: self
+                .setting(key::HIDE_FROM_CAPTURE)?
+                .map(|v| v != "false")
+                .unwrap_or(defaults.hide_from_capture),
             vault_lock_minutes: self
                 .setting(key::VAULT_LOCK_MINUTES)?
                 .and_then(|v| v.parse().ok())
@@ -418,6 +427,10 @@ impl Database {
 
     pub fn set_hide_on_blur(&self, hide: bool) -> Result<()> {
         self.set_setting(key::HIDE_ON_BLUR, &hide.to_string())
+    }
+
+    pub fn set_hide_from_capture(&self, hide: bool) -> Result<()> {
+        self.set_setting(key::HIDE_FROM_CAPTURE, &hide.to_string())
     }
 
     /// Runs `f` with the connection (the vault's store).
@@ -601,6 +614,16 @@ mod tests {
             (s.vault_lock_minutes, s.vault_lock_on_hide, s.vault_touch_id),
             (15, false, true)
         );
+    }
+
+    #[test]
+    fn hiding_from_capture_is_on_until_turned_off() {
+        let db = db();
+        assert!(db.settings().unwrap().hide_from_capture);
+        db.set_hide_from_capture(false).unwrap();
+        assert!(!db.settings().unwrap().hide_from_capture);
+        db.set_hide_from_capture(true).unwrap();
+        assert!(db.settings().unwrap().hide_from_capture);
     }
 
     #[test]

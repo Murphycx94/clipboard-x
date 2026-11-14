@@ -1,5 +1,6 @@
 //! What only Java reaches on Android — the Keystore, the biometric prompt,
-//! the clipboard's sensitive flag, the files directory — through
+//! the clipboard's sensitive flag, the windows' secure flag, the files
+//! directory — through
 //! `com.clipboardx.Bridge` (`android/java`). The packaged app carries NSH's
 //! classes only, so the bridge's dex (built by `build.rs`) is loaded here at
 //! run time, into the VM that loaded us.
@@ -49,6 +50,16 @@ pub fn copy_sensitive(text: &str, id: u64) -> Result<(), String> {
 pub fn clear_sensitive(id: u64) -> Result<(), String> {
     jvm::call(|env, bridge| {
         env.call_static_method(bridge, "clearSensitive", "(J)V", &[JValue::Long(id as i64)])?;
+        Ok(())
+    })
+}
+
+/// Keeps the app's windows out of screenshots, recordings and casts
+/// (`FLAG_SECURE`: they show black), or lets them show it. Posted to the
+/// main thread: returns at once.
+pub fn set_secure(on: bool) -> Result<(), String> {
+    jvm::call(|env, bridge| {
+        env.call_static_method(bridge, "setSecure", "(Z)V", &[JValue::Bool(u8::from(on))])?;
         Ok(())
     })
 }

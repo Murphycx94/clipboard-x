@@ -544,6 +544,13 @@ impl AppState {
         }
     }
 
+    pub fn set_hide_from_capture(self, hide: bool) {
+        let result = services().set_hide_from_capture(hide);
+        // Saved even when the window refused: show what is stored.
+        self.reload();
+        self.check(result);
+    }
+
     pub fn set_theme(self, theme: ThemePreference) {
         let saved = services().db().set_theme(theme).map_err(|e| e.to_string());
         if self.check(saved).is_some() {
