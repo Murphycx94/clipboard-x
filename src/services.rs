@@ -8,12 +8,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use crate::capture;
 use crate::db::Database;
+use crate::system_prompt::{Phase, SystemPrompts};
 use crate::telegram::{self, TelegramTarget};
 use crate::vault::keychain::{self, KeyStore};
-use crate::vault::{self, KdfParams, VaultService};
+use crate::vault::{self, KdfParams, VaultError, VaultService};
 
 /// The app's id: its data directory's name.
 pub const APP_ID: &str = "com.clipboardx.app";
@@ -32,6 +34,22 @@ pub trait WindowHost: Send + Sync {
     /// Keeps the window out of screenshots, recordings and screen sharing
     /// (`hidden`), or lets them show it.
     fn set_hidden_from_capture(&self, hidden: bool);
+    /// Gives the keyboard back to the window if it is shown: a system
+    /// prompt (Touch ID) had it.
+    fn take_keyboard(&self);
+}
+
+/// What the host's window does when it loses the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blur {
+    /// Hides: the user went elsewhere.
+    Hide,
+    /// Stays: a system prompt of ours has the keyboard, or the user keeps
+    /// the window up.
+    Stay,
+    /// Stays and takes the keyboard back: a system prompt just closed and
+    /// the system handed the keyboard to another app.
+    TakeBack,
 }
 
 pub struct Services {
@@ -45,6 +63,7 @@ pub struct Services {
     stop_capture: Arc<AtomicBool>,
     recorder: Mutex<capture::Recorder>,
     host: OnceLock<Box<dyn WindowHost>>,
+    prompts: SystemPrompts,
     vault: VaultService,
     sync: crate::cloud::Worker,
 }
@@ -159,6 +178,7 @@ impl Services {
             stop_capture: Arc::new(AtomicBool::new(false)),
             recorder: Mutex::new(capture::Recorder::new()),
             host: OnceLock::new(),
+            prompts: SystemPrompts::default(),
             sync: crate::cloud::Worker::default(),
         }
     }
@@ -210,6 +230,32 @@ impl Services {
         if let Some(host) = self.host.get() {
             host.hide();
         }
+    }
+
+    /// What the host's window does now that it lost the keyboard: hides
+    /// if the user wants (`hide_on_blur`), unless a system prompt of ours
+    /// took the keyboard.
+    pub fn window_blurred(&self) -> Blur {
+        self.window_blurred_at(Instant::now())
+    }
+
+    fn window_blurred_at(&self, now: Instant) -> Blur {
+        match self.prompts.phase(now) {
+            Phase::Open => Blur::Stay,
+            Phase::Settling => Blur::TakeBack,
+            Phase::Idle => {
+                let hide = self.db.settings().map(|s| s.hide_on_blur).unwrap_or(true);
+                if hide { Blur::Hide } else { Blur::Stay }
+            }
+        }
+    }
+
+    /// A system prompt of ours is about to take the keyboard, until the
+    /// returned value is dropped: the window stays up meanwhile and takes
+    /// the keyboard back after.
+    fn system_prompt(&self) -> SystemPrompt<'_> {
+        self.prompts.begin();
+        SystemPrompt { services: self }
     }
 
     /// Saves `hotkey` and registers it with the host when there is one.
@@ -292,6 +338,13 @@ impl Services {
     pub fn copy_vault_field(&self, id: &str, field: vault::Field) -> Result<(), String> {
         let text = self.vault.secret(id, field).map_err(|e| e.to_string())?;
         capture::copy_secret(&text)
+    }
+
+    /// Unlocks the vault with Touch ID or the fingerprint. Blocking: the
+    /// system asks the user, and its prompt has the keyboard meanwhile.
+    pub fn unlock_vault_with_touch_id(&self, reason: &str) -> Result<(), VaultError> {
+        let _prompt = self.system_prompt();
+        self.vault.unlock_with_touch_id(reason)
     }
 
     /// The host hid the window: locks the vault when the user wants it.
@@ -443,6 +496,20 @@ impl Services {
     }
 }
 
+/// A system prompt of ours, up until dropped.
+struct SystemPrompt<'a> {
+    services: &'a Services,
+}
+
+impl Drop for SystemPrompt<'_> {
+    fn drop(&mut self) {
+        self.services.prompts.end(Instant::now());
+        if let Some(host) = self.services.host.get() {
+            host.take_keyboard();
+        }
+    }
+}
+
 impl Drop for Services {
     fn drop(&mut self) {
         self.stop_capture.store(true, Ordering::Relaxed);
@@ -451,7 +518,11 @@ impl Drop for Services {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use super::*;
+    use crate::system_prompt::SETTLE;
 
     #[test]
     fn android_package_is_the_process_name_up_to_a_colon() {
@@ -512,6 +583,7 @@ mod tests {
         hidden: AtomicU64,
         hotkeys: Mutex<Vec<String>>,
         capture_hidden: Mutex<Vec<bool>>,
+        keyboard_taken: AtomicU64,
     }
 
     impl WindowHost for Arc<FakeHost> {
@@ -525,6 +597,116 @@ mod tests {
         fn set_hidden_from_capture(&self, hidden: bool) {
             self.capture_hidden.lock().unwrap().push(hidden);
         }
+        fn take_keyboard(&self) {
+            self.keyboard_taken.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A key store whose Touch ID prompt stays up until the test answers.
+    struct PromptingKeys {
+        items: keychain::MemoryKeyStore,
+        shown: Mutex<mpsc::Sender<()>>,
+        answer: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl KeyStore for PromptingKeys {
+        fn available(&self) -> bool {
+            true
+        }
+        fn put(&self, item: keychain::KeyItem, bytes: &[u8]) -> Result<(), String> {
+            self.items.put(item, bytes)
+        }
+        fn get(&self, item: keychain::KeyItem) -> Option<zeroize::Zeroizing<Vec<u8>>> {
+            self.items.get(item)
+        }
+        fn get_with_auth(
+            &self,
+            item: keychain::KeyItem,
+            reason: &str,
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+            self.shown.lock().unwrap().send(()).unwrap();
+            self.answer
+                .lock()
+                .unwrap()
+                .recv_timeout(PROMPT_WAIT)
+                .map_err(|e| e.to_string())?;
+            self.items.get_with_auth(item, reason)
+        }
+        fn delete(&self, item: keychain::KeyItem) {
+            self.items.delete(item);
+        }
+    }
+
+    /// The most a test waits for the other thread.
+    const PROMPT_WAIT: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn losing_the_keyboard_hides_the_window_when_wanted() {
+        let s = services();
+        assert_eq!(s.window_blurred(), Blur::Hide);
+        s.db().set_hide_on_blur(false).unwrap();
+        assert_eq!(s.window_blurred(), Blur::Stay);
+    }
+
+    #[test]
+    fn the_touch_id_prompt_keeps_the_window_up_and_gives_the_keyboard_back() {
+        const MASTER: &str = "correct horse battery";
+        let (shown, prompt_shown) = mpsc::channel();
+        let (answer_prompt, answer) = mpsc::channel();
+        let s = Services::with_vault(
+            Database::in_memory().unwrap(),
+            PathBuf::from("/tmp"),
+            Box::new(PromptingKeys {
+                items: keychain::MemoryKeyStore::with_auth(),
+                shown: Mutex::new(shown),
+                answer: Mutex::new(answer),
+            }),
+            KdfParams::INSECURE_TEST,
+        );
+        let host = Arc::new(FakeHost::default());
+        s.set_host(Box::new(host.clone()));
+        s.vault().setup(MASTER).unwrap();
+        s.vault().enable_touch_id(MASTER).unwrap();
+        s.lock_vault();
+        let before = Instant::now();
+
+        std::thread::scope(|scope| {
+            let unlocking = scope.spawn(|| s.unlock_vault_with_touch_id("解锁"));
+            prompt_shown.recv_timeout(PROMPT_WAIT).unwrap();
+            // The prompt has the keyboard: the window stays, so the vault
+            // is not locked under the unlock (`vault_lock_on_hide`).
+            assert_eq!(s.window_blurred(), Blur::Stay);
+            assert_eq!(host.keyboard_taken.load(Ordering::Relaxed), 0);
+            answer_prompt.send(()).unwrap();
+            unlocking.join().unwrap().unwrap();
+        });
+
+        assert_eq!(s.vault().status(), vault::VaultStatus::Unlocked);
+        assert_eq!(host.keyboard_taken.load(Ordering::Relaxed), 1);
+        // As the prompt closes the system moves the keyboard once more.
+        let settling = before + SETTLE - Duration::from_millis(1);
+        assert_eq!(s.window_blurred_at(settling), Blur::TakeBack);
+        // Later the user going elsewhere hides the window again.
+        assert_eq!(s.window_blurred_at(Instant::now() + SETTLE), Blur::Hide);
+    }
+
+    #[test]
+    fn a_canceled_touch_id_prompt_gives_the_keyboard_back_too() {
+        let s = Services::with_vault(
+            Database::in_memory().unwrap(),
+            PathBuf::from("/tmp"),
+            Box::new(keychain::MemoryKeyStore::without_auth()),
+            KdfParams::INSECURE_TEST,
+        );
+        let host = Arc::new(FakeHost::default());
+        s.set_host(Box::new(host.clone()));
+        s.vault().setup("correct horse battery").unwrap();
+        s.lock_vault();
+
+        assert!(s.unlock_vault_with_touch_id("解锁").is_err());
+
+        assert_eq!(host.keyboard_taken.load(Ordering::Relaxed), 1);
+        assert_eq!(s.window_blurred_at(Instant::now() + SETTLE), Blur::Hide);
     }
 
     #[test]

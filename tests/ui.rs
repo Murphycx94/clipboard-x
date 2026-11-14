@@ -27,6 +27,7 @@ impl WindowHost for RecordingHost {
     fn set_hidden_from_capture(&self, hidden: bool) {
         self.capture_hidden.lock().unwrap().push(hidden);
     }
+    fn take_keyboard(&self) {}
 }
 
 fn seed() {
