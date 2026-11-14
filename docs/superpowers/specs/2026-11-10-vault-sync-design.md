@@ -3,7 +3,7 @@
 - 日期：2026-11-10
 - 分支：`feat/nsh`
 - 前置：`2026-11-09-password-vault-design.md`（本地密码本）
-- 状态：已确认，实现中；PVE 上的部署暂缓（用户不在家），服务端代码与测试先在本地完成
+- 状态：已实现；2026-11-14 部署到家里 PVE 的 LXC 容器（Debian 13，Tailscale），步骤见 `server/deploy/README.md`
 
 ## 1. 目标
 
@@ -22,7 +22,7 @@
 | 秘密密钥（两把钥匙派生） | 要 |
 | 网络 | Tailscale（无需开放端口、无需 DDNS），服务器只监听 Tailscale 地址 |
 | 代码位置 | 本仓库（公开）：`server/` 与 `crates/sync-proto/`；地址、令牌等一律不进仓库 |
-| 部署 | 暂缓，本地完成并测试 |
+| 部署 | 已部署到 PVE 上的 LXC（2026-11-14） |
 
 ## 3. 安全设计
 
@@ -98,7 +98,7 @@ DEK（不变）由 KEK 包装，条目由 DEK 加密
 - `server/`：Rust 二进制 `clipboardx-sync-server`（axum + tokio + rusqlite），单个 SQLite 文件。
 - 配置通过命令行或环境变量：`--listen 100.x.y.z:8787 --data /var/lib/clipboardx-sync`。
 - `crates/sync-proto/`：客户端与服务端共用的请求和响应类型。
-- 部署（暂缓）：`server/deploy/` 下提供 systemd 单元、安装脚本与说明（LXC + Tailscale）。
+- 部署：`server/deploy/` 下提供 systemd 单元、安装脚本与说明（LXC + Tailscale）。
 - CI：额外编译 Linux x86_64 版服务端，发布时作为附件。
 
 ## 6. 公开仓库
