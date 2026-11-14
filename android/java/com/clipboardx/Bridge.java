@@ -1,5 +1,6 @@
 package com.clipboardx;
 
+import android.app.Activity;
 import android.app.Application;
 import android.content.ClipData;
 import android.content.ClipDescription;
@@ -9,6 +10,7 @@ import android.content.pm.PackageManager;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
@@ -16,9 +18,16 @@ import android.os.PersistableBundle;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
+import android.util.Log;
+import android.view.Window;
+import android.view.WindowManager;
 
+import java.lang.reflect.Field;
 import java.security.KeyStore;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -31,7 +40,8 @@ import javax.crypto.spec.GCMParameterSpec;
 
 /**
  * What ClipboardX's Rust code needs from Android that only Java reaches: the
- * Keystore, the biometric prompt and the clipboard's sensitive flag. Loaded by
+ * Keystore, the biometric prompt, the clipboard's sensitive flag and the
+ * windows' secure flag. Loaded by
  * Rust at run time (InMemoryDexClassLoader); every method is static.
  *
  * Errors are exceptions whose message Rust reads: "canceled" (the user closed
@@ -48,13 +58,14 @@ public final class Bridge {
     private static final String EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE";
     private static final String CANCELED = "canceled";
     private static final String INVALIDATED = "invalidated";
+    private static final String TAG = "ClipboardX";
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private Bridge() {}
 
     /** The application, through the framework's own record of it. */
-    private static Context context() throws Exception {
+    private static Application application() throws Exception {
         Application app = (Application) Class.forName("android.app.ActivityThread")
                 .getMethod("currentApplication")
                 .invoke(null);
@@ -62,6 +73,10 @@ public final class Bridge {
             throw new IllegalStateException("no application yet");
         }
         return app;
+    }
+
+    private static Context context() throws Exception {
+        return application();
     }
 
     /** The app's private files directory. */
@@ -275,6 +290,91 @@ public final class Bridge {
                 clipboard.setPrimaryClip(ClipData.newPlainText("", ""));
             }
         });
+    }
+
+    /** Whether the activities' windows are secure, and watched for. Main thread. */
+    private static boolean secure;
+    private static boolean watchingActivities;
+
+    /**
+     * Keeps the app's windows out of screenshots, recordings and casts to
+     * displays that are not secure (FLAG_SECURE: they show black, and so does
+     * the recents' preview), or lets them show it: the activities there are
+     * and the ones made later. Posted to the main thread: returns at once.
+     */
+    public static void setSecure(boolean on) throws Exception {
+        Application app = application();
+        MAIN.post(() -> {
+            secure = on;
+            if (!watchingActivities) {
+                watchingActivities = true;
+                app.registerActivityLifecycleCallbacks(new SecureWindows());
+            }
+            for (Activity activity : activities()) {
+                applySecure(activity);
+            }
+        });
+    }
+
+    private static void applySecure(Activity activity) {
+        Window window = activity.getWindow();
+        if (window == null) {
+            return;
+        }
+        if (secure) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        }
+    }
+
+    /**
+     * The activities there are, from the framework's own record of them (no
+     * public API lists them). Main thread. None when the record is not what
+     * it was: the activities are then reached as they start or resume.
+     */
+    private static List<Activity> activities() {
+        List<Activity> found = new ArrayList<>();
+        try {
+            Class<?> threadClass = Class.forName("android.app.ActivityThread");
+            Object thread = threadClass.getMethod("currentActivityThread").invoke(null);
+            Field records = threadClass.getDeclaredField("mActivities");
+            records.setAccessible(true);
+            for (Object record : ((Map<?, ?>) records.get(thread)).values()) {
+                Field activity = record.getClass().getDeclaredField("activity");
+                activity.setAccessible(true);
+                Object value = activity.get(record);
+                if (value instanceof Activity) {
+                    found.add((Activity) value);
+                }
+            }
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Log.w(TAG, "cannot list the activities; their windows follow as they resume", e);
+        }
+        return found;
+    }
+
+    /** Applies the secure flag to each activity as it is made, starts or resumes. */
+    private static final class SecureWindows implements Application.ActivityLifecycleCallbacks {
+        @Override public void onActivityCreated(Activity activity, Bundle state) {
+            applySecure(activity);
+        }
+
+        @Override public void onActivityStarted(Activity activity) {
+            applySecure(activity);
+        }
+
+        @Override public void onActivityResumed(Activity activity) {
+            applySecure(activity);
+        }
+
+        @Override public void onActivityPaused(Activity activity) {}
+
+        @Override public void onActivityStopped(Activity activity) {}
+
+        @Override public void onActivitySaveInstanceState(Activity activity, Bundle state) {}
+
+        @Override public void onActivityDestroyed(Activity activity) {}
     }
 
     private static ClipboardManager clipboard() throws Exception {

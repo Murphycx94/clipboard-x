@@ -29,6 +29,9 @@ pub trait WindowHost: Send + Sync {
     fn hide(&self);
     /// Registers `hotkey` as the global shortcut in place of the current one.
     fn set_hotkey(&self, hotkey: &str) -> Result<(), String>;
+    /// Keeps the window out of screenshots, recordings and screen sharing
+    /// (`hidden`), or lets them show it.
+    fn set_hidden_from_capture(&self, hidden: bool);
 }
 
 pub struct Services {
@@ -223,6 +226,43 @@ impl Services {
     #[cfg(target_os = "android")]
     pub fn set_hotkey(&self, _hotkey: &str) -> Result<(), String> {
         Err("安卓不支持全局快捷键".to_owned())
+    }
+
+    // --- Screen captures ----------------------------------------------------
+
+    /// Whether the window can be kept out of screenshots, recordings and
+    /// screen sharing: Android's activity, or a desktop host's own window
+    /// (NSH's standard window cannot).
+    pub fn can_hide_from_capture(&self) -> bool {
+        cfg!(target_os = "android") || self.has_host()
+    }
+
+    /// Saves whether the window is kept out of screen captures, and does it.
+    pub fn set_hide_from_capture(&self, hide: bool) -> Result<(), String> {
+        self.db
+            .set_hide_from_capture(hide)
+            .map_err(|e| e.to_string())?;
+        self.apply_capture_protection()
+    }
+
+    /// Keeps the window out of screen captures or lets them show it, as the
+    /// settings say; out of them when the settings cannot be read.
+    pub fn apply_capture_protection(&self) -> Result<(), String> {
+        let hide = self
+            .db
+            .settings()
+            .map(|s| s.hide_from_capture)
+            .unwrap_or_else(|e| {
+                log::error!("cannot read the settings, hiding from screen captures: {e}");
+                true
+            });
+        #[cfg(target_os = "android")]
+        crate::android::set_secure(hide)?;
+        #[cfg(not(target_os = "android"))]
+        if let Some(host) = self.host.get() {
+            host.set_hidden_from_capture(hide);
+        }
+        Ok(())
     }
 
     // --- The vault ----------------------------------------------------------
@@ -471,6 +511,7 @@ mod tests {
     struct FakeHost {
         hidden: AtomicU64,
         hotkeys: Mutex<Vec<String>>,
+        capture_hidden: Mutex<Vec<bool>>,
     }
 
     impl WindowHost for Arc<FakeHost> {
@@ -480,6 +521,9 @@ mod tests {
         fn set_hotkey(&self, hotkey: &str) -> Result<(), String> {
             self.hotkeys.lock().unwrap().push(hotkey.to_owned());
             Ok(())
+        }
+        fn set_hidden_from_capture(&self, hidden: bool) {
+            self.capture_hidden.lock().unwrap().push(hidden);
         }
     }
 
@@ -511,6 +555,23 @@ mod tests {
         s.set_hotkey("Ctrl+Shift+K").unwrap();
         assert_eq!(*host.hotkeys.lock().unwrap(), vec!["Ctrl+Shift+K"]);
         assert_eq!(s.db().settings().unwrap().hotkey, "Ctrl+Shift+K");
+    }
+
+    #[test]
+    fn hiding_from_capture_is_saved_and_goes_to_the_host() {
+        let s = services();
+        // No window of ours yet: saved for the host to come.
+        assert!(!s.can_hide_from_capture());
+        s.set_hide_from_capture(false).unwrap();
+        assert!(!s.db().settings().unwrap().hide_from_capture);
+
+        let host = Arc::new(FakeHost::default());
+        s.set_host(Box::new(host.clone()));
+        assert!(s.can_hide_from_capture());
+        s.apply_capture_protection().unwrap();
+        s.set_hide_from_capture(true).unwrap();
+        assert_eq!(*host.capture_hidden.lock().unwrap(), vec![false, true]);
+        assert!(s.db().settings().unwrap().hide_from_capture);
     }
 
     #[test]
