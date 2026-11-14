@@ -138,7 +138,7 @@ impl AppState {
     /// setting goes off, so the lock page stops offering it.
     pub fn vault_unlock_touch_id(self) {
         self.run_vault(
-            || match services().vault().unlock_with_touch_id(TOUCH_ID_REASON) {
+            || match services().unlock_vault_with_touch_id(TOUCH_ID_REASON) {
                 Err(VaultError::BiometricKeyGone(why)) => {
                     services().db().set_vault_touch_id(false)?;
                     Ok(Some(why))
