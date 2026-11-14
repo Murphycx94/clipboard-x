@@ -2,7 +2,8 @@
 //! the screen under the mouse (it takes the keyboard without taking the
 //! focus from the app the user copies from), shown and hidden by the
 //! global shortcut and the menu-bar icon, hidden when it loses the
-//! keyboard if the user wants. No Dock icon.
+//! keyboard if the user wants (but not to a system prompt of ours, as
+//! Touch ID's). No Dock icon.
 //!
 //! Everything AppKit lives on the main thread, in `HOST`; the UI (on the
 //! engine thread) reaches it through `MacHost`, which posts to the main
@@ -35,7 +36,7 @@ use objc2_foundation::{
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use clipboardx::services::{WindowHost, services};
+use clipboardx::services::{Blur, WindowHost, services};
 
 /// Set to anything to show the panel at launch (development).
 const SHOW_ON_START_ENV: &str = "CLIPBOARDX_SHOW";
@@ -99,6 +100,10 @@ impl WindowHost for MacHost {
     fn set_hidden_from_capture(&self, hidden: bool) {
         with_host(move |host| host.set_hidden_from_capture(hidden));
     }
+
+    fn take_keyboard(&self) {
+        with_host(Host::take_keyboard);
+    }
 }
 
 define_class!(
@@ -112,13 +117,11 @@ define_class!(
     unsafe impl NSWindowDelegate for PanelDelegate {
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
-            let hide = services()
-                .db()
-                .settings()
-                .map(|s| s.hide_on_blur)
-                .unwrap_or(true);
-            if hide {
-                host_now(Host::hide);
+            match services().window_blurred() {
+                Blur::Hide => host_now(Host::hide),
+                // Posted: AppKit is still moving the keyboard.
+                Blur::TakeBack => with_host(Host::take_keyboard),
+                Blur::Stay => {}
             }
         }
     }
@@ -150,6 +153,15 @@ impl Host {
             self.panel.makeFirstResponder(Some(&root));
         }
         services().window_shown();
+    }
+
+    /// Makes the panel the key window again if it is shown: a system
+    /// prompt (Touch ID) had the keyboard, and the system does not hand
+    /// it back.
+    fn take_keyboard(&self) {
+        if self.is_shown() {
+            self.panel.makeKeyWindow();
+        }
     }
 
     fn toggle(&self) {
