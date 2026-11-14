@@ -6,26 +6,41 @@
 
 在 PVE 里新建一个容器：
 
-- 模板：Debian 12；无特权容器即可
-- 资源：1 核、256 MB 内存、2 GB 磁盘就足够
+- 模板：Debian 13（`debian-13-standard`）；无特权容器，勾选"嵌套"（nesting）
+- 资源：1 核、512 MB 内存、4 GB 磁盘就足够
+- 网络：接在局域网网桥上，DHCP 即可（服务不监听局域网地址，这个地址只用来 SSH 进去维护）
 
-Tailscale 需要 `/dev/net/tun`。在 PVE 宿主机上编辑 `/etc/pve/lxc/<容器ID>.conf`，加入下面两行，然后重启容器：
+Tailscale 需要 `/dev/net/tun`。PVE 8.1 及以上可以直接把这个设备直通给容器：在容器的"资源 › 添加 › 设备直通"里填 `/dev/net/tun`，或者在 PVE 宿主机上执行（`102` 换成容器 ID）：
+
+```sh
+pct set 102 -dev0 /dev/net/tun
+```
+
+更早的 PVE 版本：在宿主机上编辑 `/etc/pve/lxc/<容器ID>.conf`，加入下面两行，然后重启容器：
 
 ```
 lxc.cgroup2.devices.allow: c 10:200 rwm
 lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
 ```
 
+国内下载官方模板很慢时，可以在宿主机上从镜像下载到 `/var/lib/vz/template/cache/`，例如 `https://mirrors.tuna.tsinghua.edu.cn/proxmox/images/system/`，再按 PVE 列出的 sha512 校验。
+
 ## 2. 在容器里安装 Tailscale
 
+用 Tailscale 官方签名的 apt 源安装（Debian 13 代号 `trixie`）：
+
 ```sh
-apt update && apt install -y curl
-curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up            # 按提示在浏览器里登录，与 Mac 使用同一个账号
-tailscale ip -4         # 记下 100.x.y.z
+apt update && apt install -y curl sqlite3
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+  -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
+  -o /etc/apt/sources.list.d/tailscale.list
+apt update && apt install -y tailscale
+tailscale up --hostname=clipboardx-sync   # 按提示在浏览器里登录，与 Mac、手机使用同一个账号
+tailscale ip -4                           # 记下 100.x.y.z
 ```
 
-Mac 上也要安装 Tailscale 并登录同一个账号。
+Mac 和手机上也要安装 Tailscale 并登录同一个账号。
 
 ## 3. 安装同步服务器
 
