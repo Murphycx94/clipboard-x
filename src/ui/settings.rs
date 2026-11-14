@@ -1,6 +1,6 @@
 //! The settings page.
 
-use nsh_base::{switch, theme};
+use nsh_base::{SwitchElement, switch, theme};
 use nsh_core::prelude::*;
 
 use crate::model::{RETENTION_OPTIONS, ThemePreference, VAULT_LOCK_OPTIONS, hotkey_label};
@@ -89,8 +89,27 @@ pub fn settings_page(state: AppState) -> impl IntoElement {
     )
 }
 
-/// The shortcut and hiding on blur (desktops: a phone has neither), and
-/// the appearance.
+/// Keeping the window out of screen captures, where it can be.
+fn capture_row(state: AppState) -> AnyElement {
+    row(
+        Icon::EyeOff,
+        "防截屏录屏",
+        if is_touch() {
+            "截图、录屏和投屏时显示为黑屏"
+        } else {
+            "不出现在截图、录屏和屏幕共享中，部分录屏软件仍可能录到"
+        },
+        switch_control(
+            move || state.settings.get().hide_from_capture,
+            move |on| state.set_hide_from_capture(on),
+        )
+        .accessibility_label("防截屏录屏"),
+    )
+    .into_element()
+}
+
+/// The shortcut and hiding on blur (desktops: a phone has neither), the
+/// appearance, and hiding from screen captures.
 fn general_rows(state: AppState) -> Vec<AnyElement> {
     let appearance = row(
         Icon::Contrast,
@@ -106,10 +125,13 @@ fn general_rows(state: AppState) -> Vec<AnyElement> {
         ),
     )
     .into_element();
+    let capture = services()
+        .can_hide_from_capture()
+        .then(|| capture_row(state));
     if is_touch() {
-        return vec![appearance];
+        return std::iter::once(appearance).chain(capture).collect();
     }
-    vec![
+    [
         hotkey_row(state).into_element(),
         row(
             Icon::Eye,
@@ -123,6 +145,9 @@ fn general_rows(state: AppState) -> Vec<AnyElement> {
         .into_element(),
         appearance,
     ]
+    .into_iter()
+    .chain(capture)
+    .collect()
 }
 
 /// The vault's settings; a link to the vault page until it is set up.
@@ -421,7 +446,7 @@ fn row_header(state: AppState) -> impl IntoElement {
 fn switch_control(
     checked: impl Fn() -> bool + Copy + 'static,
     on_change: impl Fn(bool) + 'static,
-) -> impl IntoElement {
+) -> SwitchElement {
     switch()
         .checked(checked)
         .on_change(move |next: &bool| on_change(*next))

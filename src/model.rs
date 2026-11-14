@@ -126,6 +126,8 @@ pub struct Settings {
     pub telegram_chat_id: String,
     pub theme: ThemePreference,
     pub hide_on_blur: bool,
+    /// Keep the window out of screenshots, recordings and screen sharing.
+    pub hide_from_capture: bool,
     /// Idle minutes before the vault locks.
     pub vault_lock_minutes: i64,
     /// Lock the vault when the panel hides.
@@ -143,6 +145,7 @@ impl Default for Settings {
             telegram_chat_id: String::new(),
             theme: ThemePreference::System,
             hide_on_blur: true,
+            hide_from_capture: true,
             vault_lock_minutes: 5,
             vault_lock_on_hide: true,
             vault_touch_id: false,
@@ -167,6 +170,7 @@ impl fmt::Debug for Settings {
             .field("telegram_chat_id", &self.telegram_chat_id)
             .field("theme", &self.theme)
             .field("hide_on_blur", &self.hide_on_blur)
+            .field("hide_from_capture", &self.hide_from_capture)
             .field("vault_lock_minutes", &self.vault_lock_minutes)
             .field("vault_lock_on_hide", &self.vault_lock_on_hide)
             .field("vault_touch_id", &self.vault_touch_id)

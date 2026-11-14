@@ -2,15 +2,32 @@
 //! database in a temporary directory. One scenario, as the services are a
 //! process-wide singleton.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clipboardx::services::{DATA_DIR_ENV, NO_CAPTURE_ENV, services};
+use clipboardx::services::{DATA_DIR_ENV, NO_CAPTURE_ENV, WindowHost, services};
 use nsh_core::geometry::{Points, Size};
 use nsh_core::platform::{Idiom, Os};
 use nsh_engine::EngineConfig;
 use nsh_testing::Headless;
 
 const WAIT: Duration = Duration::from_secs(5);
+
+/// A host's window: what it was told about screen captures.
+#[derive(Default, Clone)]
+struct RecordingHost {
+    capture_hidden: Arc<Mutex<Vec<bool>>>,
+}
+
+impl WindowHost for RecordingHost {
+    fn hide(&self) {}
+    fn set_hotkey(&self, _hotkey: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn set_hidden_from_capture(&self, hidden: bool) {
+        self.capture_hidden.lock().unwrap().push(hidden);
+    }
+}
 
 fn seed() {
     let db = services().db();
@@ -55,6 +72,8 @@ fn browsing_searching_and_clearing_history() {
         std::env::set_var(NO_CAPTURE_ENV, "1");
     }
     seed();
+    let host = RecordingHost::default();
+    services().set_host(Box::new(host.clone()));
     let mut app = start();
 
     // Today's history, newest first, with notes.
@@ -119,4 +138,12 @@ fn browsing_searching_and_clearing_history() {
     app.press("保存").unwrap();
     app.wait_for("快捷键已更新").unwrap();
     assert_eq!(services().db().settings().unwrap().hotkey, "Alt+Space");
+
+    // Hidden from screen captures until the user lets them show the window.
+    assert!(app.shows("防截屏录屏"));
+    assert!(services().db().settings().unwrap().hide_from_capture);
+    app.press("label:防截屏录屏").unwrap();
+    app.settle();
+    assert!(!services().db().settings().unwrap().hide_from_capture);
+    assert_eq!(*host.capture_hidden.lock().unwrap(), vec![false]);
 }
