@@ -152,7 +152,14 @@ mod mac {
         }
         match rx.recv_timeout(PROMPT_TIMEOUT) {
             Ok(true) => Ok(()),
-            Ok(false) | Err(_) => Err("已取消验证".into()),
+            Ok(false) => Err("已取消验证".into()),
+            Err(_) => {
+                // Closes the prompt: nobody waits for its answer anymore.
+                // SAFETY: a context of ours; invalidating it only cancels
+                // the evaluation.
+                unsafe { ctx.invalidate() };
+                Err("已取消验证".into())
+            }
         }
     }
 

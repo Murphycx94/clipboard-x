@@ -17,6 +17,7 @@ pub mod hotkey;
 pub mod logger;
 pub mod model;
 pub mod services;
+mod system_prompt;
 pub mod telegram;
 mod ui;
 pub mod updater;
