@@ -16,6 +16,8 @@ use common::wait;
 
 const VIEWPORT_HEIGHT: f32 = 900.0;
 const AWAY: Duration = Duration::from_millis(400);
+const LONG_PRESS_TRIES: usize = 3;
+const MENU_WAIT: Duration = Duration::from_secs(3);
 
 fn start_phone() -> Headless {
     let mut config = EngineConfig::new(clipboardx::root());
@@ -44,6 +46,21 @@ fn copy_elsewhere(app: &mut Headless, text: &str) {
         e.lifecycle = Lifecycle::Active;
     })
     .unwrap();
+}
+
+/// Long-presses `item` until its actions show `action`: a press that lands
+/// while the list redraws (an item just recorded) is dropped, as on a phone.
+fn open_actions(app: &mut Headless, item: &str, action: &str) {
+    for _ in 0..LONG_PRESS_TRIES {
+        app.long_press(item).unwrap();
+        if app.wait_for_within(action, MENU_WAIT).is_ok() {
+            return;
+        }
+    }
+    panic!(
+        "long-pressing {item:?} never showed {action:?}: {:?}",
+        app.screen().texts()
+    );
 }
 
 #[test]
@@ -79,11 +96,9 @@ fn a_phone_records_on_return_and_acts_on_long_press() {
     assert!(app.press("label:关闭 (Esc)").is_err());
 
     // A long press opens the item's actions: favorite it, then delete it.
-    app.long_press("copied in another app").unwrap();
-    wait(&mut app, "收藏");
+    open_actions(&mut app, "copied in another app", "收藏");
     app.press("收藏").unwrap();
-    app.long_press("copied in another app").unwrap();
-    wait(&mut app, "取消收藏");
+    open_actions(&mut app, "copied in another app", "取消收藏");
     app.press("删除").unwrap();
     app.wait_for_gone("copied in another app", common::SLOW)
         .unwrap();
@@ -91,8 +106,7 @@ fn a_phone_records_on_return_and_acts_on_long_press() {
     // A dialog moves up out of the software keyboard's way.
     copy_elsewhere(&mut app, "with a note");
     wait(&mut app, "with a note");
-    app.long_press("with a note").unwrap();
-    wait(&mut app, "备注");
+    open_actions(&mut app, "with a note", "备注");
     app.press("备注").unwrap();
     wait(&mut app, "输入备注内容…");
     let keyboard = 380.0;
