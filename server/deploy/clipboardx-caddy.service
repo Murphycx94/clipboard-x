@@ -1,0 +1,46 @@
+[Unit]
+Description=HTTPS and DDNS for the ClipboardX sync server (Caddy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/clipboardx-sync/caddy.env
+# Certificates and the ACME account.
+Environment=XDG_DATA_HOME=/var/lib/clipboardx-caddy
+Environment=XDG_CONFIG_HOME=/var/lib/clipboardx-caddy
+ExecStart=/usr/local/bin/clipboardx-caddy run --config /etc/clipboardx-sync/Caddyfile --adapter caddyfile
+User=clipboardx-caddy
+Group=clipboardx-caddy
+StateDirectory=clipboardx-caddy
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictSUIDSGID=true
+RestrictRealtime=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+# The port is above 1024: no capability needed.
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
