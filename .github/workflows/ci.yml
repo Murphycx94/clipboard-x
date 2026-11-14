@@ -1,14 +1,23 @@
 name: CI
 
-# Every push and pull request: format, lint and test, then package a
-# universal macOS app and an Android APK (workflow artifacts). Pushes to
-# main whose version (Cargo.toml) has no tag yet also publish a GitHub
-# release v<version>, which the app's update check finds.
+# Every push: format, lint and test and, alongside, package a universal
+# macOS app, an Android APK and the sync server (workflow artifacts). Pushes
+# to main whose version (Cargo.toml) has no tag yet also publish a GitHub
+# release v<version>, which the app's update check finds, once all of that
+# passed.
+#
+# A pull request shows the run of its branch's push and has none of its own:
+# the same commit would build twice, into a second set of caches. So one
+# from a fork is not checked here.
+#
+# A push that only changes documentation runs nothing.
 
 on:
   push:
     branches: ["**"]
-  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
   workflow_dispatch:
 
 permissions:
@@ -23,9 +32,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: fmt, clippy, test
+  lint:
+    name: fmt, clippy
     runs-on: macos-latest
+    env:
+      # Nobody debugs these builds: without debug info they are faster from
+      # scratch and their caches smaller. (Release builds have none anyway.)
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +51,20 @@ jobs:
       - run: cargo fmt --all --check
 
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # A job of its own: clippy's build and the tests' share nothing, so from
+  # scratch the two finish sooner side by side.
+  test:
+    name: test
+    runs-on: macos-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       # The app, the sync server and the protocol; includes the headless UI
       # tests and the end-to-end sync tests against a local server. They
@@ -89,9 +116,10 @@ jobs:
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
+  # The three packages do not wait for the checks: the release does.
   package:
     name: package macOS
-    needs: [check, version]
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -126,12 +154,13 @@ jobs:
 
   android:
     name: package Android
-    needs: [check, version]
+    needs: version
     runs-on: ubuntu-latest
     env:
       # The CLI builds this crate against its own NSH: keep it at the
       # version Cargo.toml depends on.
       NSH_VERSION: v0.5.0
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
 
@@ -156,9 +185,14 @@ jobs:
           targets: aarch64-linux-android, armv7-linux-androideabi
           components: clippy
 
+      # ./target (clippy) and the directory `nsh package` builds in, below.
+      # That one is kept whole: left in ./target, the Android runtime's
+      # crates would be dropped from the cache, as no dependency of this
+      # crate, and built again by every run.
       - uses: Swatinem/rust-cache@v2
         with:
           key: android
+          cache-directories: ~/nsh-target
 
       # The library only: the dev-dependencies (the headless UI tests)
       # do not build for Android. SQLite's C needs the NDK's compiler.
@@ -183,6 +217,8 @@ jobs:
           NSH_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           SHOULD_RELEASE: ${{ needs.version.outputs.should_release }}
         run: |
+          # The cached directory (see rust-cache above).
+          export CARGO_TARGET_DIR="$HOME/nsh-target"
           if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
             export ANDROID_KEYSTORE="$RUNNER_TEMP/release.jks"
             printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$ANDROID_KEYSTORE"
@@ -204,7 +240,7 @@ jobs:
 
   server:
     name: package sync server (Linux)
-    needs: [check, version]
+    needs: version
     runs-on: ubuntu-latest
     env:
       NAME: clipboardx-sync-server-${{ needs.version.outputs.version }}-linux-x86_64
@@ -226,20 +262,33 @@ jobs:
         run: cargo build --release -p clipboardx-sync-server --target x86_64-unknown-linux-musl
 
       # Caddy with the Alibaba Cloud DNS and dynamic DNS modules, pinned
-      # in the script: HTTPS and DDNS in front of the server.
+      # in the script: HTTPS and DDNS in front of the server. Built again
+      # only when the script changes or Go does (its TLS and HTTP fixes
+      # are part of the binary).
       - uses: actions/setup-go@v5
+        id: go
         with:
           go-version: stable
+          # Nothing of Go's to cache: the repository has no go.sum.
+          cache: false
+
+      - uses: actions/cache@v4
+        id: caddy
+        with:
+          path: caddy-bin
+          key: caddy-linux-x86_64-go${{ steps.go.outputs.go-version }}-${{ hashFiles('server/deploy/build-caddy.sh') }}
 
       - name: Build Caddy
+        if: steps.caddy.outputs.cache-hit != 'true'
         run: |
-          mkdir -p "dist/$NAME"
-          server/deploy/build-caddy.sh "$PWD/dist/$NAME/caddy"
+          mkdir -p caddy-bin
+          server/deploy/build-caddy.sh "$PWD/caddy-bin/caddy"
 
       - name: Package with the deploy kit
         run: |
           mkdir -p "dist/$NAME"
-          cp target/x86_64-unknown-linux-musl/release/clipboardx-sync-server "dist/$NAME/"
+          cp target/x86_64-unknown-linux-musl/release/clipboardx-sync-server \
+            caddy-bin/caddy "dist/$NAME/"
           cp server/deploy/install.sh server/deploy/clipboardx-sync.service \
             server/deploy/clipboardx-sync.env.example server/deploy/Caddyfile \
             server/deploy/caddy.env.example server/deploy/clipboardx-caddy.service \
@@ -257,7 +306,7 @@ jobs:
 
   release:
     name: release
-    needs: [version, package, android, server]
+    needs: [version, lint, test, package, android, server]
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:

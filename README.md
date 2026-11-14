@@ -115,8 +115,9 @@ SIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh --dmg
 
 `.github/workflows/ci.yml`：
 
-- **每次推送和 PR**：在 macOS 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test`（含无头 UI 测试），然后打包通用版 `.dmg` 和 `.app` 压缩包，作为工作流产物（Actions 页面的 Artifacts）供下载。
-- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，就自动打标签并发布 GitHub Release，附带 `.dmg` 和 `.zip`。应用内的"检查更新"读取的就是这里的最新版本。
+- **每次推送**：在 macOS 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test`（含无头 UI 测试）；同时打包 macOS 通用版（`.dmg` 和 `.app` 压缩包）、安卓 `.apk` 和同步服务端，作为工作流产物（Actions 页面的 Artifacts）供下载。只改文档（`docs/`、`*.md`）的推送不触发。
+- **PR**：没有单独的一轮，页面上显示的是分支那次推送的结果（来自 fork 的 PR 因此不会被检查）。
+- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，等检查和打包全部通过后自动打标签并发布 GitHub Release，附带上面三种包。应用内的"检查更新"读取的就是这里的最新版本。
 - **发新版本的步骤**：同时修改 `Cargo.toml` 和 `nsh.json` 的 `version`（两处不一致时 CI 会失败），然后合并到 `main`。
 
 `nsh package --target macos` 也能打包，但它使用 NSH 生成的通用运行器，没有菜单栏图标、全局快捷键和浮动面板，只适合预览界面。
