@@ -36,33 +36,30 @@ fn sync_error(why: impl std::fmt::Display) -> VaultError {
 }
 
 /// `url` as the base of the API (`…/v1`), when it is safe to send to:
-/// `https://` anywhere; `http://` only inside the tailnet (100.64.0.0/10,
-/// `*.ts.net`) or on this machine.
+/// `https://` anywhere; plain `http://` only on this machine (tests, a
+/// tunnel), since tokens would cross the network in the clear.
 pub fn api_base(url: &str) -> Result<String, VaultError> {
     let url = url.trim().trim_end_matches('/');
     let parsed = reqwest::Url::parse(url).map_err(|_| sync_error("服务器地址格式不正确"))?;
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-    let tailnet_or_local = || {
+    let local = || {
         host == "localhost"
-            || host.ends_with(".ts.net")
             || host == "[::1]"
-            || host.parse::<Ipv4Addr>().is_ok_and(|ip| {
-                ip.is_loopback() || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
-            })
+            || host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
     };
     match parsed.scheme() {
         "https" => {}
-        "http" if tailnet_or_local() => {}
+        "http" if local() => {}
         "http" => {
             return Err(sync_error(
-                "明文 http 只允许 Tailscale 地址（100.x.x.x、*.ts.net）或本机，其他地址请使用 https",
+                "服务器地址需使用 https://，明文 http 只允许本机地址",
             ));
         }
-        _ => return Err(sync_error("服务器地址需以 http:// 或 https:// 开头")),
+        _ => return Err(sync_error("服务器地址需以 https:// 开头")),
     }
     if host.is_empty() || parsed.path() != "/" && !parsed.path().is_empty() {
         return Err(sync_error(
-            "服务器地址只需填写主机和端口，例如 http://100.101.102.103:8787",
+            "服务器地址只需填写域名和端口，例如 https://sync.example.com:8443",
         ));
     }
     Ok(format!("{url}{}", clipboardx_sync_proto::API))
@@ -126,7 +123,7 @@ impl Client {
     fn send(&self, request: RequestBuilder) -> Result<Response, VaultError> {
         self.authed(request).send().map_err(|e| {
             log::warn!("sync request failed: {e}");
-            sync_error("无法连接同步服务器，请检查地址和 Tailscale 连接")
+            sync_error("无法连接同步服务器，请检查地址和网络连接")
         })
     }
 
@@ -530,22 +527,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_http_only_inside_the_tailnet() {
+    fn plain_http_only_on_this_machine() {
         assert_eq!(
-            api_base("http://100.101.102.103:8787/").unwrap(),
-            "http://100.101.102.103:8787/v1"
+            api_base("https://sync.example.com:8443/").unwrap(),
+            "https://sync.example.com:8443/v1"
         );
-        assert!(api_base("http://pve.tail1234.ts.net:8787").is_ok());
         assert!(api_base("http://127.0.0.1:8787").is_ok());
         assert!(api_base("http://localhost:8787").is_ok());
-        assert!(api_base("https://vault.example.com").is_ok());
+        assert!(api_base("http://[::1]:8787").is_ok());
         for bad in [
+            "http://100.101.102.103:8787",
+            "http://pve.tail1234.ts.net:8787",
             "http://192.168.1.10:8787",
             "http://example.com",
-            "http://100.200.1.1:8787",
-            "ftp://100.101.102.103",
+            "ftp://sync.example.com",
             "not a url",
-            "https://vault.example.com/some/path",
+            "https://sync.example.com/some/path",
         ] {
             assert!(api_base(bad).is_err(), "{bad} should be refused");
         }
@@ -553,8 +550,8 @@ mod tests {
 
     #[test]
     fn events_go_over_ws_or_wss() {
-        let plain = Client::new("http://100.101.102.103:8787").unwrap();
-        assert_eq!(plain.events_url(), "ws://100.101.102.103:8787/v1/events");
+        let plain = Client::new("http://127.0.0.1:8787").unwrap();
+        assert_eq!(plain.events_url(), "ws://127.0.0.1:8787/v1/events");
         let tls = Client::new("https://vault.example.com").unwrap();
         assert_eq!(tls.events_url(), "wss://vault.example.com/v1/events");
     }

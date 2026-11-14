@@ -1,7 +1,8 @@
-//! `clipboardx-sync-server --listen 100.x.y.z:8787 --data /var/lib/clipboardx-sync`
+//! `clipboardx-sync-server --listen 127.0.0.1:8787 --data /var/lib/clipboardx-sync`
 //!
-//! Listen on the Tailscale address only: the tailnet's WireGuard tunnel
-//! carries the traffic, and nothing outside it can reach the server.
+//! Listen on this machine only: a TLS proxy in front of it (Caddy, see
+//! `server/deploy`) serves it over HTTPS, so device tokens never cross a
+//! network in the clear.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use clipboardx_sync_server::{Config, issue_pairing_code, new_state, router, stor
 
 const USAGE: &str = "usage: clipboardx-sync-server [--listen ADDR:PORT] [--data DIR]
   --listen   address to listen on (env CLIPBOARDX_SYNC_LISTEN, default 127.0.0.1:8787);
-             use this machine's Tailscale address, e.g. 100.101.102.103:8787
+             keep it on this machine, behind an HTTPS proxy
   --data     directory of the database (env CLIPBOARDX_SYNC_DATA, default ./data)
 
 SIGUSR1 prints a pairing code (valid 10 minutes), for when no device is

@@ -91,7 +91,7 @@ Keystore、BiometricPrompt、敏感剪贴板标记、`filesDir` 只能从 Java �
 
 - 剪贴板：`lifecycle()` 变为 Active → `capture::read_foreground()` → `Services::record_clipboard`（`Recorder` 去重） → `db` → `services.notify_changed()` → UI 刷新（与桌面同一路径）。
 - 密码本、同步：与桌面完全相同（`VaultService` + `cloud` 工作线程 + WebSocket）。App 进入后台时 NSH 宿主可能被系统暂停，同步线程停止无妨；回到前台且已解锁时立即同步一次（复用现有"解锁后立即同步"逻辑）。
-- 网络规则不变：只允许以明文 http 访问 Tailscale 地址和本机。手机上需安装并连接 Tailscale App。同步走 Rust 自己的网络栈，不受安卓的明文流量策略限制，清单不用加网络安全配置；地址校验由 Rust 侧负责（模拟器上用 `adb reverse` 把本机端口映射到 127.0.0.1 联调已验证）。
+- 网络规则与桌面相同：服务器用 https 域名，明文 http 只允许本机。同步走 Rust 自己的网络栈，不受安卓的明文流量策略限制，清单不用加网络安全配置；地址校验由 Rust 侧负责（模拟器上用 `adb reverse` 把本机端口映射到 127.0.0.1 联调已验证）。
 
 ## 7. 错误处理
 

@@ -3,7 +3,7 @@
 - 日期：2026-11-10
 - 分支：`feat/nsh`
 - 前置：`2026-11-09-password-vault-design.md`（本地密码本）
-- 状态：已实现；2026-11-14 部署到家里 PVE 的 LXC 容器（Debian 13，Tailscale），步骤见 `server/deploy/README.md`
+- 状态：已实现；2026-11-14 部署到家里 PVE 的 LXC 容器（Debian 13）。同日把网络从 Tailscale 改为域名 + HTTPS + DDNS（用户反馈 Tailscale 每台设备都要装、不方便），步骤见 `server/deploy/README.md`
 
 ## 1. 目标
 
@@ -20,7 +20,7 @@
 | 问题 | 决定 |
 |---|---|
 | 秘密密钥（两把钥匙派生） | 要 |
-| 网络 | Tailscale（无需开放端口、无需 DDNS），服务器只监听 Tailscale 地址 |
+| 网络 | 域名 + HTTPS（Caddy，Let's Encrypt 证书走阿里云 DNS 验证）+ DDNS；路由器转发一个非 80/443 端口；同步服务器只监听 127.0.0.1 |
 | 代码位置 | 本仓库（公开）：`server/` 与 `crates/sync-proto/`；地址、令牌等一律不进仓库 |
 | 部署 | 已部署到 PVE 上的 LXC（2026-11-14） |
 
@@ -58,8 +58,8 @@ DEK（不变）由 KEK 包装，条目由 DEK 加密
 
 ### 3.4 网络
 
-- 服务器监听 Tailscale 地址（如 `100.x.y.z:8787`），WireGuard 隧道加密传输，应用层再加令牌。
-- 客户端只允许 `http://` 访问 Tailscale 地址（`100.64.0.0/10`、`*.ts.net`）、`localhost`，或任意 `https://`；其他明文地址拒绝。
+- 同步服务器只监听 `127.0.0.1:8787`，同机的 Caddy 在域名上提供 HTTPS 并反向代理，应用层再加令牌。Caddy 同时用阿里云 DNS API 维护 A 记录（DDNS）。
+- 客户端只允许任意 `https://`，以及本机的 `http://`（`localhost`、`127.0.0.0/8`、`[::1]`，测试和隧道用）；其他明文地址拒绝。证书按系统根证书（webpki）校验。
 
 ## 4. 同步
 
@@ -98,7 +98,7 @@ DEK（不变）由 KEK 包装，条目由 DEK 加密
 - `server/`：Rust 二进制 `clipboardx-sync-server`（axum + tokio + rusqlite），单个 SQLite 文件。
 - 配置通过命令行或环境变量：`--listen 100.x.y.z:8787 --data /var/lib/clipboardx-sync`。
 - `crates/sync-proto/`：客户端与服务端共用的请求和响应类型。
-- 部署：`server/deploy/` 下提供 systemd 单元、安装脚本与说明（LXC + Tailscale）。
+- 部署：`server/deploy/` 下提供 systemd 单元、Caddy 配置与构建脚本、安装脚本与说明（LXC + Caddy）。
 - CI：额外编译 Linux x86_64 版服务端，发布时作为附件。
 
 ## 6. 公开仓库
@@ -141,4 +141,4 @@ DEK（不变）由 KEK 包装，条目由 DEK 加密
 - 只在密码本解锁时同步；锁定期间的远端改动在下次解锁时同步。
 - 设备令牌泄露后，持有者读不到任何明文，但可以覆盖或损坏服务器上的密文（服务器不保留历史），使同步中断；本机数据不受影响。应及时吊销该设备，并定期备份服务器数据库。
 - 新设备加入时没有可比对的信任锚：服务器可以给新设备提供旧的快照（无法伪造内容）。
-- 明文 http 只允许 Tailscale 地址段 `100.64.0.0/10`。若 Tailscale 未连接，而所在网络恰好是运营商使用同一地址段的大内网，令牌可能以明文发出。建议使用 MagicDNS 名（`*.ts.net`）作为服务器地址。
+- 服务暴露在公网：管理码和配对码 40 位、10 分钟有效、一次性，连续输错全局冷却（攻击者可借此暂时阻止配对，但拿不到令牌）。阿里云 AccessKey 存在容器里（0600，RAM 子账号只给解析权限）。泄露后，持有者能改解析、给域名签证书，从而截获设备令牌；令牌只能读写密文（见上一条），读不到明文。发现泄露时在 RAM 控制台禁用并更换，再吊销设备。

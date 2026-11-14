@@ -1,7 +1,6 @@
 [Unit]
 Description=ClipboardX sync server (ciphertext only)
-After=network-online.target tailscaled.service
-Wants=network-online.target tailscaled.service
+After=network.target
 
 [Service]
 EnvironmentFile=/etc/clipboardx-sync.env
@@ -11,7 +10,6 @@ User=clipboardx-sync
 Group=clipboardx-sync
 StateDirectory=clipboardx-sync
 StateDirectoryMode=0700
-# The Tailscale address may come up after this service: retry.
 Restart=on-failure
 RestartSec=5
 
@@ -39,9 +37,9 @@ ProtectProc=invisible
 ProcSubset=pid
 CapabilityBoundingSet=
 UMask=0077
-# Only the tailnet (and this machine) may talk to it.
+# Only Caddy, on this machine, talks to it.
 IPAddressDeny=any
-IPAddressAllow=100.64.0.0/10 fd7a:115c:a1e0::/48 localhost
+IPAddressAllow=localhost
 
 [Install]
 WantedBy=multi-user.target
