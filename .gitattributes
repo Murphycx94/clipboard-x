@@ -1,0 +1,6 @@
+# The same line endings on every platform: Windows checkouts would
+# otherwise turn the sources and the files compiled into the app to CRLF.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary

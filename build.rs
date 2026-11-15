@@ -3,6 +3,8 @@
 //! NSH's own classes only. Needs `javac` (JAVA_HOME) and the Android SDK
 //! (ANDROID_HOME: a platform's android.jar, build-tools' d8 and lambda
 //! stubs).
+//!
+//! Windows (built there): gives the executable its icon and manifest.
 
 use std::env;
 use std::fs;
@@ -19,6 +21,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ANDROID_HOME");
     println!("cargo:rerun-if-env-changed=ANDROID_SDK_ROOT");
     println!("cargo:rerun-if-env-changed=JAVA_HOME");
+    #[cfg(windows)]
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_windows_resources();
+    }
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
         return;
     }
@@ -65,6 +71,46 @@ fn main() {
         .arg("--output")
         .arg(&out)
         .args(&class_files));
+}
+
+/// What Windows reads of the executable before it runs: version 6 of the
+/// common controls (window subclassing, themed menus and dialogs), scaling
+/// per monitor, and that it is made for Windows 10 and 11.
+#[cfg(windows)]
+const WINDOWS_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>
+"#;
+
+/// The executable's icon (resource 1, which NSH gives its windows) and
+/// manifest. Needs the Windows SDK's resource compiler.
+#[cfg(windows)]
+fn embed_windows_resources() {
+    println!("cargo:rerun-if-changed=assets/icon.ico");
+    let mut resources = winresource::WindowsResource::new();
+    resources.set_icon("assets/icon.ico");
+    resources.set_manifest(WINDOWS_MANIFEST);
+    // What the task manager and the file's properties call it.
+    resources.set("ProductName", "ClipboardX");
+    resources.set("FileDescription", "ClipboardX");
+    if let Err(e) = resources.compile() {
+        panic!("cannot compile the Windows resources: {e}");
+    }
 }
 
 fn javac() -> PathBuf {

@@ -113,8 +113,14 @@ pub const VAULT_LOCK_OPTIONS: [(i64, &str); 4] = [
     (30, "30 分钟"),
 ];
 
-/// The default global shortcut.
-pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Shift+V";
+/// The default global shortcut. Not Ctrl+Shift+V on Windows: a global
+/// shortcut takes its keys from every app, and there those paste as plain
+/// text in browsers, editors and terminals.
+pub const DEFAULT_HOTKEY: &str = if cfg!(target_os = "windows") {
+    "Alt+Shift+V"
+} else {
+    "CmdOrCtrl+Shift+V"
+};
 
 /// The user's settings, as stored.
 #[derive(Clone, PartialEq)]

@@ -1,7 +1,8 @@
 name: CI
 
-# Every push: format, lint and test and, alongside, package a universal
-# macOS app, an Android APK and the sync server (workflow artifacts). Pushes
+# Every push: format, lint and test (on macOS and on Windows) and,
+# alongside, package a universal macOS app, a Windows installer, an Android
+# APK and the sync server (workflow artifacts). Pushes
 # to main whose version (Cargo.toml) has no tag yet also publish a GitHub
 # release v<version>, which the app's update check finds, once all of that
 # passed.
@@ -33,12 +34,21 @@ env:
 
 jobs:
   lint:
-    name: fmt, clippy
-    runs-on: macos-latest
+    name: fmt, clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Each desktop compiles code of its own: one failing says nothing of
+      # the other.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     env:
       # Nobody debugs these builds: without debug info they are faster from
       # scratch and their caches smaller. (Release builds have none anyway.)
       CARGO_PROFILE_DEV_DEBUG: 0
+      # Windows: the TLS library's assembly comes prebuilt, as the runner
+      # has no NASM.
+      AWS_LC_SYS_PREBUILT_NASM: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -55,10 +65,15 @@ jobs:
   # A job of its own: clippy's build and the tests' share nothing, so from
   # scratch the two finish sooner side by side.
   test:
-    name: test
-    runs-on: macos-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
+      AWS_LC_SYS_PREBUILT_NASM: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +83,8 @@ jobs:
 
       # The app, the sync server and the protocol; includes the headless UI
       # tests and the end-to-end sync tests against a local server. They
-      # keep off the clipboard and the keychain by themselves.
+      # keep off the clipboard and the keychain by themselves. On Windows
+      # also the sealed key files, with the runner's own account.
       - run: cargo test --workspace
 
   secrets:
@@ -150,6 +166,43 @@ jobs:
             dist/ClipboardX-*.dmg
             dist/ClipboardX-*-macos-universal.zip
             dist/ClipboardX-*.sha256
+          if-no-files-found: error
+
+  windows:
+    name: package Windows
+    needs: version
+    runs-on: windows-latest
+    env:
+      AWS_LC_SYS_PREBUILT_NASM: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release
+
+      # The runner image does not always carry it.
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      # The app alone in a zip, and its installer; neither is signed.
+      - name: Build the app, its zip and its installer
+        shell: pwsh
+        run: scripts/package-windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipboardX-${{ needs.version.outputs.version }}-windows
+          path: |
+            dist/ClipboardX-*-windows-x86_64.zip
+            dist/ClipboardX-*-windows-x86_64-setup.exe
+            dist/ClipboardX-*-windows-x86_64*.sha256
           if-no-files-found: error
 
   android:
@@ -306,7 +359,7 @@ jobs:
 
   release:
     name: release
-    needs: [version, lint, test, package, android, server]
+    needs: [version, lint, test, package, windows, android, server]
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -315,6 +368,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ClipboardX-${{ needs.version.outputs.version }}-macos
+          path: artifacts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ClipboardX-${{ needs.version.outputs.version }}-windows
           path: artifacts
 
       - uses: actions/download-artifact@v4
@@ -341,12 +399,16 @@ jobs:
             在"访达"中按住 Control 点按应用并选择"打开"，或在终端运行
             `xattr -dr com.apple.quarantine /Applications/ClipboardX.app`。
 
+            `ClipboardX-…-windows-x86_64-setup.exe` 是 Windows 版安装包（Windows 10 1809 及以上，64 位），`…-windows-x86_64.zip` 是免安装版。两者都没有代码签名，首次运行时 SmartScreen 会提示"Windows 已保护你的电脑"：点"更多信息"，再点"仍要运行"。
+
             `ClipboardX-…-android.apk` 是安卓版（Android 8 及以上），下载后在手机上安装；首次安装需允许浏览器或文件管理器"安装未知应用"。
 
             `clipboardx-sync-server-…-linux-x86_64.tar.gz` 是密码本云同步的服务端（静态编译），部署说明见压缩包内的 README.md。
           files: |
             artifacts/ClipboardX-*.dmg
             artifacts/ClipboardX-*-macos-universal.zip
+            artifacts/ClipboardX-*-windows-x86_64-setup.exe
+            artifacts/ClipboardX-*-windows-x86_64.zip
             artifacts/ClipboardX-*-android.apk
             artifacts/clipboardx-sync-server-*-linux-x86_64.tar.gz
             artifacts/*.sha256

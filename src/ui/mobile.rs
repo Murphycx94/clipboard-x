@@ -16,12 +16,16 @@ pub fn is_touch() -> bool {
 }
 
 /// What the system's confirmation of the user is called in the UI: Touch ID
-/// on the Mac, the fingerprint or face on a phone.
+/// on the Mac, Windows Hello on Windows, the fingerprint or face on a phone.
 pub fn biometric() -> &'static str {
-    if is_touch() {
-        "指纹/面容"
-    } else {
-        "Touch ID"
+    biometric_on(os())
+}
+
+fn biometric_on(os: Os) -> &'static str {
+    match os {
+        Os::Android | Os::Ios => "指纹/面容",
+        Os::Windows => "Windows Hello",
+        Os::MacOs | Os::Linux | Os::Web => "Touch ID",
     }
 }
 
@@ -132,6 +136,14 @@ mod tests {
             MobileTab::of(Page::Main, Tab::Favorites),
             MobileTab::Favorites
         );
+    }
+
+    #[test]
+    fn the_users_confirmation_is_named_after_the_system() {
+        assert_eq!(biometric_on(Os::MacOs), "Touch ID");
+        assert_eq!(biometric_on(Os::Windows), "Windows Hello");
+        assert_eq!(biometric_on(Os::Android), "指纹/面容");
+        assert_eq!(biometric_on(Os::Ios), "指纹/面容");
     }
 
     #[test]

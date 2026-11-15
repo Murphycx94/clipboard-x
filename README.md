@@ -9,14 +9,14 @@
 ## 功能
 
 1. **全量历史记录**：每 500ms 读取一次剪贴板，记录文本与图片；内容按哈希去重，重复复制的条目移到最前
-2. **快捷键唤出**：默认 `Cmd+Shift+V`（Windows/Linux 为 `Ctrl+Shift+V`），可在设置中修改，保存后立即生效
+2. **快捷键唤出**：默认 `Cmd+Shift+V`（Windows 为 `Alt+Shift+V`，Linux 为 `Ctrl+Shift+V`），可在设置中修改，保存后立即生效
 3. **今日历史 / 收藏夹**：内容按时间倒序排列，支持搜索（文本与备注）和"只看图片"
 4. **历史归档**：非当日内容按日期分组折叠，点击展开
 5. **收藏与备注**：悬停条目可添加备注、收藏、删除；点击图片缩略图查看大图
 6. **快捷复制**：点击条目复制回剪贴板；`Enter` 或 `⌘⇧1`–`⌘⇧9` 复制并收起窗口
 7. **设置**：失焦自动隐藏、外观主题（浅色/深色/跟随系统）、历史保留时间（一周/一个月/一年/永久）、清除历史、检查更新
 8. **Telegram 同步**：配置 Bot Token 与 Chat ID 后，收藏变化时把收藏列表推送到 Telegram
-9. **密码本**：加密保存账号、密码、网址、两步验证码（TOTP）和备注，支持密码生成器、Touch ID 解锁和加密备份（见下文）
+9. **密码本**：加密保存账号、密码、网址、两步验证码（TOTP）和备注，支持密码生成器、Touch ID / Windows Hello 解锁和加密备份（见下文）
 
 ### 键盘
 
@@ -55,6 +55,8 @@
 - 当前 ad-hoc 签名下，Touch ID 采用"先通过系统验证、再读取仅本应用可访问的钥匙串项"的方式。最严格的"仅生物识别可读"钥匙串访问控制需要 Developer ID 签名。
 - 每次重新构建（签名变化）后，系统可能询问是否允许访问钥匙串。
 - 点击"显示"后，明文密码会进入界面控件，无法保证从内存中清零。
+- **Windows**：秘密密钥、设备令牌和 Windows Hello 解锁用的密钥副本以 DPAPI 密封后存放在数据目录的 `keys\` 下。DPAPI 按 Windows 账户保护而不是按应用保护：同一账户下运行的其他程序可以不经提示解开这些文件，Windows Hello 在这里只是"确认是你本人"，不是密钥上的锁。这弱于 macOS 上"仅本应用可读"的钥匙串项，介意的话不要开启 Windows Hello 解锁。重置 Windows 账户密码或把数据目录拷到别的账户、别的电脑后，这些文件无法解开：需要重新输入秘密密钥、重新加入同步。
+- **Windows** 上没有"不抢焦点的浮动面板"：面板唤出时会成为前台窗口，收起时把键盘交还给原来的窗口。面板显示期间会出现在 Alt+Tab 中。
 
 ### 云同步（零知识）
 
@@ -100,7 +102,7 @@ nsh check
 | `CLIPBOARDX_SHOW` | 设置后启动时显示面板 |
 | `CLIPBOARDX_NO_KEYCHAIN` | 设置后不访问系统钥匙串，即不使用 Touch ID（测试用） |
 
-数据库仍是 `~/Library/Application Support/com.clipboardx.app/clipboardx.db`，表结构与 Tauri 版相同，旧版的历史、收藏和设置会直接沿用。
+数据库在 macOS 上仍是 `~/Library/Application Support/com.clipboardx.app/clipboardx.db`（Windows 上是 `%APPDATA%\com.clipboardx.app\clipboardx.db`），表结构与 Tauri 版相同，旧版的历史、收藏和设置会直接沿用。
 
 ## 打包（macOS）
 
@@ -111,13 +113,26 @@ scripts/bundle-macos.sh --universal --dmg   # Apple 芯片 + Intel 通用版（�
 SIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh --dmg
 ```
 
+## 打包（Windows）
+
+在 Windows 上（需要 Visual Studio 的 C++ 生成工具；安装包另需 [Inno Setup 6](https://jrsoftware.org/isinfo.php)）：
+
+```powershell
+scripts\package-windows.ps1               # dist\ClipboardX-<版本>-windows-x86_64.zip 与 …-setup.exe
+scripts\package-windows.ps1 -NoInstaller  # 只出免安装的 zip
+```
+
+安装包按当前用户安装（不需要管理员），带开始菜单项，可勾选"登录 Windows 时启动"。C 运行库静态链接（`.cargo/config.toml`），不依赖 Visual C++ 运行库。两种包都没有代码签名，首次运行时 SmartScreen 会提示。
+
+这台 Mac 上不编译 Windows 版：编译、测试和打包都由 CI 的 Windows runner 完成。
+
 ### GitHub Actions
 
 `.github/workflows/ci.yml`：
 
-- **每次推送**：在 macOS 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test`（含无头 UI 测试）；同时打包 macOS 通用版（`.dmg` 和 `.app` 压缩包）、安卓 `.apk` 和同步服务端，作为工作流产物（Actions 页面的 Artifacts）供下载。只改文档（`docs/`、`*.md`）的推送不触发。
+- **每次推送**：在 macOS 和 Windows 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test`（含无头 UI 测试）；同时打包 macOS 通用版（`.dmg` 和 `.app` 压缩包）、Windows 安装包与免安装 zip、安卓 `.apk` 和同步服务端，作为工作流产物（Actions 页面的 Artifacts）供下载。只改文档（`docs/`、`*.md`）的推送不触发。
 - **PR**：没有单独的一轮，页面上显示的是分支那次推送的结果（来自 fork 的 PR 因此不会被检查）。
-- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，等检查和打包全部通过后自动打标签并发布 GitHub Release，附带上面三种包。应用内的"检查更新"读取的就是这里的最新版本。
+- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，等检查和打包全部通过后自动打标签并发布 GitHub Release，附带上面四种包。应用内的"检查更新"读取的就是这里的最新版本。
 - **发新版本的步骤**：同时修改 `Cargo.toml` 和 `nsh.json` 的 `version`（两处不一致时 CI 会失败），然后合并到 `main`。
 
 `nsh package --target macos` 也能打包，但它使用 NSH 生成的通用运行器，没有菜单栏图标、全局快捷键和浮动面板，只适合预览界面。
@@ -125,7 +140,8 @@ SIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh --dmg
 ## 平台支持
 
 - **macOS 14+**：完整支持。应用以浮动面板运行：不抢占前台应用的焦点，在鼠标所在屏幕的右侧显示，所有桌面空间可见。
-- **Windows / Linux**：`src/main.rs` 会以 NSH 的普通窗口运行同一套界面和剪贴板记录，但尚未接入托盘图标、全局快捷键和失焦隐藏，也未在这两个平台上编译验证。
+- **Windows 10 1809+ / Windows 11**（64 位）：托盘图标、全局快捷键唤出的置顶面板（显示在鼠标所在屏幕的右侧）、失焦隐藏、防截屏（Windows 10 2004 起从截图中消失，更早的版本显示为黑块）、锁屏/注销/睡眠时锁定密码本、Windows Hello 解锁、不记录其他密码管理器标记为敏感的复制内容、单实例（再次启动只是唤出已运行的面板）。圆角仅 Windows 11 有。由 CI 编译和测试；托盘、快捷键、Windows Hello 等交互需要在真机上验证，清单见 `docs/superpowers/specs/2026-11-14-windows-client-design.md`。
+- **Linux**：`src/main.rs` 会以 NSH 的普通窗口运行同一套界面和剪贴板记录，但尚未接入托盘图标、全局快捷键和失焦隐藏，也未编译验证。
 
 ---
 
@@ -142,6 +158,7 @@ ClipboardX/
 │   ├── lib.rs             # 模块声明、NSH 根组件注册、root()
 │   ├── main.rs            # 桌面入口：初始化日志与剪贴板监听，启动宿主
 │   ├── macos.rs           # macOS 宿主：NSPanel、菜单栏图标、全局快捷键、失焦隐藏
+│   ├── windows_host.rs    # Windows 宿主：置顶面板、托盘图标、全局快捷键、失焦隐藏、锁屏监听、单实例
 │   ├── model.rs           # 数据类型与纯函数（过滤、按日分组、掩码、标签）
 │   ├── db.rs              # SQLite 存取（历史与设置）
 │   ├── capture.rs         # 剪贴板轮询、PNG 编码与缩略图、复制回剪贴板
