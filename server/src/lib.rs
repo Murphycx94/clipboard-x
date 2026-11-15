@@ -4,11 +4,15 @@
 
 pub mod store;
 
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use axum::extract::connect_info::IntoMakeServiceWithConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
@@ -27,6 +31,15 @@ use store::{Refused, Store};
 /// Uploads up to this size (a whole vault re-encrypted after a password
 /// change goes up at once).
 const BODY_LIMIT: usize = 32 * 1024 * 1024;
+/// What a request with a code may weigh (a code and a device's name): read
+/// before the code is checked, so anyone can send it.
+const CODE_BODY_LIMIT: usize = 4 * 1024;
+/// What the proxy in front of the server says of who it speaks for.
+const FORWARDED_FOR: &str = "x-forwarded-for";
+/// Clients whose wrong codes are counted apart at once.
+const MAX_GUESSING_CLIENTS: usize = 4096;
+/// Whom the clients past [`MAX_GUESSING_CLIENTS`] are counted as, together.
+const EVERYONE_ELSE: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 const CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_DEVICE_NAME: usize = 64;
 
@@ -34,10 +47,13 @@ const MAX_DEVICE_NAME: usize = 64;
 pub struct Config {
     /// How long admin and pairing codes last.
     pub code_ttl: Duration,
-    /// Wrong codes in a row before codes are refused for `cooldown`.
+    /// Wrong codes in a row from one client before its codes are refused
+    /// for `cooldown`.
     pub max_failures: u32,
-    /// How long codes are refused after too many wrong ones. Outstanding
-    /// codes stay valid: a stranger's guesses must not void the user's.
+    /// How long a client's codes are refused after too many wrong ones.
+    /// Outstanding codes stay valid, and other clients' are still taken: a
+    /// stranger's guesses must neither void the user's code nor keep the
+    /// user out.
     pub cooldown: Duration,
 }
 
@@ -56,12 +72,31 @@ struct Code {
     expires: Instant,
 }
 
+/// One client's wrong codes.
+struct Guesses {
+    failures: u32,
+    cooldown_until: Option<Instant>,
+    /// When to forget them: a cooldown after the last one.
+    forgotten_at: Instant,
+}
+
 #[derive(Default)]
 struct Codes {
     admin: Option<Code>,
     pairing: Vec<Code>,
-    failures: u32,
-    cooldown_until: Option<Instant>,
+    guesses: HashMap<IpAddr, Guesses>,
+}
+
+impl Codes {
+    /// Whom `client`'s wrong codes count as: itself, or everyone else
+    /// while too many clients guess for each to be told apart.
+    fn guesser(&self, client: IpAddr) -> IpAddr {
+        if self.guesses.contains_key(&client) || self.guesses.len() < MAX_GUESSING_CLIENTS {
+            client
+        } else {
+            EVERYONE_ELSE
+        }
+    }
 }
 
 /// Pairing codes outstanding at once; a new one replaces the oldest.
@@ -96,21 +131,42 @@ impl AppState {
         }
     }
 
-    /// Counts a wrong code; past the limit every outstanding code goes.
-    /// Counts a wrong code; past the limit codes are refused for a while
-    /// (40-bit codes, a few guesses a minute: never found in time).
-    fn failed_code(&self, codes: &mut Codes) {
-        codes.failures += 1;
-        if codes.failures >= self.config.max_failures {
-            log::warn!("too many wrong codes: refusing codes for a while");
-            codes.cooldown_until = Some(Instant::now() + self.config.cooldown);
-            codes.failures = 0;
+    /// Counts a wrong code from `client`; past the limit its codes are
+    /// refused for a while (40-bit codes, a few guesses a minute from each
+    /// address: never found in time).
+    fn failed_code(&self, codes: &mut Codes, client: IpAddr) {
+        let now = Instant::now();
+        if codes.guesses.len() >= MAX_GUESSING_CLIENTS {
+            // Room for who guesses now.
+            codes
+                .guesses
+                .retain(|_, guesses| guesses.forgotten_at > now);
+        }
+        let client = codes.guesser(client);
+        let guesses = codes.guesses.entry(client).or_insert(Guesses {
+            failures: 0,
+            cooldown_until: None,
+            forgotten_at: now,
+        });
+        if guesses.forgotten_at <= now {
+            guesses.failures = 0;
+        }
+        guesses.failures += 1;
+        guesses.forgotten_at = now + self.config.cooldown;
+        if guesses.failures >= self.config.max_failures {
+            log::warn!("too many wrong codes from {client}: refusing its codes for a while");
+            guesses.cooldown_until = Some(now + self.config.cooldown);
+            guesses.failures = 0;
         }
     }
 
-    /// Refuses any code while cooling down.
-    fn check_cooldown(&self, codes: &Codes) -> ApiResult<()> {
-        match codes.cooldown_until {
+    /// Refuses any code from `client` while it cools down.
+    fn check_cooldown(&self, codes: &Codes, client: IpAddr) -> ApiResult<()> {
+        let until = codes
+            .guesses
+            .get(&codes.guesser(client))
+            .and_then(|g| g.cooldown_until);
+        match until {
             Some(until) if until > Instant::now() => Err(error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "too many wrong codes, try again in a minute",
@@ -145,9 +201,11 @@ pub fn new_state(
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
+    // Inside the router's own limit, the nearer one counts.
+    let code_body = || DefaultBodyLimit::max(CODE_BODY_LIMIT);
     Router::new()
-        .route("/v1/bootstrap", post(bootstrap))
-        .route("/v1/join", post(join))
+        .route("/v1/bootstrap", post(bootstrap).layer(code_body()))
+        .route("/v1/join", post(join).layer(code_body()))
         .route("/v1/pair", post(pair))
         .route("/v1/devices", get(devices))
         .route("/v1/devices/{id}", delete(revoke))
@@ -158,9 +216,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// The API as a service that knows each connection's peer, which telling
+/// clients apart needs (see [`Client`]).
+pub fn service(state: Arc<AppState>) -> IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+    router(state).into_make_service_with_connect_info::<SocketAddr>()
+}
+
 /// Serves the API on `listener` until it fails.
 pub async fn serve(listener: tokio::net::TcpListener, state: Arc<AppState>) -> std::io::Result<()> {
-    axum::serve(listener, router(state)).await
+    axum::serve(listener, service(state)).await
 }
 
 // --- Helpers ---------------------------------------------------------------
@@ -272,10 +336,62 @@ impl FromRequestParts<Arc<AppState>> for Authed {
     }
 }
 
+/// Who a request comes from, to count wrong codes by.
+struct Client(IpAddr);
+
+impl<S: Sync> FromRequestParts<S> for Client {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Infallible> {
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
+        // The last line, should there be several: the proxy's own.
+        let forwarded = parts
+            .headers
+            .get_all(FORWARDED_FOR)
+            .iter()
+            .next_back()
+            .and_then(|value| value.to_str().ok());
+        Ok(Client(client_address(peer, forwarded)))
+    }
+}
+
+/// The address a request comes from: its peer's, or, when the peer is the
+/// proxy on this machine, the one the proxy saw (the last it listed: the
+/// ones before come from the request and prove nothing). Without a peer
+/// (served without [`service`]) every request is one client.
+fn client_address(peer: Option<IpAddr>, forwarded: Option<&str>) -> IpAddr {
+    let peer = peer.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let seen_by_proxy = forwarded
+        // ::ffff:127.0.0.1 too, as a listener on both families sees it.
+        .filter(|_| peer.to_canonical().is_loopback())
+        .and_then(|list| list.rsplit(',').next())
+        .and_then(|address| address.trim().parse::<IpAddr>().ok());
+    network(seen_by_proxy.unwrap_or(peer))
+}
+
+/// An IPv6 address's /56: a subscriber holds that much or a part of it,
+/// and would otherwise be as many clients as it likes.
+fn network(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let [a, b, c, d, ..] = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(a, b, c, d & 0xff00, 0, 0, 0, 0))
+            }
+        },
+        v4 @ IpAddr::V4(_) => v4,
+    }
+}
+
 // --- Devices ---------------------------------------------------------------
 
 async fn bootstrap(
     State(state): State<Arc<AppState>>,
+    Client(client): Client,
     Json(request): Json<BootstrapRequest>,
 ) -> ApiResult<Json<DeviceToken>> {
     let name = device_name(&request.device_name)?;
@@ -284,20 +400,20 @@ async fn bootstrap(
     }
     {
         let mut codes = state.codes();
-        state.check_cooldown(&codes)?;
+        state.check_cooldown(&codes, client)?;
         let given = normalize_code(&request.admin_code);
         let valid = codes.admin.as_ref().is_some_and(|code| {
             code.expires > Instant::now() && same(&normalize_code(&code.value), &given)
         });
         if !valid {
-            state.failed_code(&mut codes);
+            state.failed_code(&mut codes, client);
             return Err(error(
                 StatusCode::UNAUTHORIZED,
                 "invalid or expired admin code",
             ));
         }
         codes.admin = None;
-        codes.failures = 0;
+        codes.guesses.remove(&client);
     }
     Ok(Json(register(&state, &name)?))
 }
@@ -329,12 +445,13 @@ pub fn issue_pairing_code(state: &AppState) -> PairingCode {
 
 async fn join(
     State(state): State<Arc<AppState>>,
+    Client(client): Client,
     Json(request): Json<JoinRequest>,
 ) -> ApiResult<Json<DeviceToken>> {
     let name = device_name(&request.device_name)?;
     {
         let mut codes = state.codes();
-        state.check_cooldown(&codes)?;
+        state.check_cooldown(&codes, client)?;
         let given = normalize_code(&request.code);
         let now = Instant::now();
         let found = codes
@@ -344,10 +461,10 @@ async fn join(
         match found {
             Some(at) => {
                 codes.pairing.remove(at);
-                codes.failures = 0;
+                codes.guesses.remove(&client);
             }
             None => {
-                state.failed_code(&mut codes);
+                state.failed_code(&mut codes, client);
                 return Err(error(
                     StatusCode::UNAUTHORIZED,
                     "invalid or expired pairing code",
@@ -506,5 +623,104 @@ mod tests {
         ));
         assert!(!same("ABCD", "ABCE"));
         assert!(!same("ABCD", "ABC"));
+    }
+
+    fn address(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn the_proxy_on_this_machine_says_who_it_speaks_for() {
+        let proxy = Some(address("127.0.0.1"));
+        assert_eq!(
+            client_address(proxy, Some("203.0.113.9")),
+            address("203.0.113.9")
+        );
+        // What the request itself claimed comes first, and counts for
+        // nothing.
+        assert_eq!(
+            client_address(proxy, Some("198.51.100.7, 203.0.113.9")),
+            address("203.0.113.9")
+        );
+        assert_eq!(client_address(proxy, None), address("127.0.0.1"));
+        assert_eq!(
+            client_address(proxy, Some("not an address")),
+            address("127.0.0.1")
+        );
+        for local in ["::1", "::ffff:127.0.0.1"] {
+            assert_eq!(
+                client_address(Some(address(local)), Some("203.0.113.9")),
+                address("203.0.113.9")
+            );
+        }
+    }
+
+    #[test]
+    fn a_peer_elsewhere_is_not_believed_about_others() {
+        assert_eq!(
+            client_address(Some(address("192.0.2.1")), Some("203.0.113.9")),
+            address("192.0.2.1")
+        );
+        assert_eq!(
+            client_address(None, Some("203.0.113.9")),
+            address("0.0.0.0")
+        );
+    }
+
+    fn state(config: Config) -> Arc<AppState> {
+        new_state(Store::in_memory().unwrap(), config).unwrap().0
+    }
+
+    fn numbered(n: u32) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::from(0x0b00_0000 + n))
+    }
+
+    #[test]
+    fn old_wrong_codes_are_forgotten() {
+        let state = state(Config {
+            max_failures: 2,
+            cooldown: Duration::from_millis(40),
+            ..Config::default()
+        });
+        let client = numbered(1);
+        let mut codes = state.codes();
+        state.failed_code(&mut codes, client);
+        std::thread::sleep(Duration::from_millis(60));
+        state.failed_code(&mut codes, client);
+        assert!(state.check_cooldown(&codes, client).is_ok());
+        state.failed_code(&mut codes, client);
+        assert!(state.check_cooldown(&codes, client).is_err());
+    }
+
+    #[test]
+    fn guessing_clients_past_the_limit_count_as_one() {
+        let state = state(Config::default());
+        let mut codes = state.codes();
+        let crowd = u32::try_from(MAX_GUESSING_CLIENTS).unwrap() + 50;
+        for n in 0..crowd {
+            state.failed_code(&mut codes, numbered(n));
+        }
+        assert_eq!(codes.guesses.len(), MAX_GUESSING_CLIENTS + 1);
+        // The latecomers' wrong codes added up, and cool every newcomer.
+        assert!(state.check_cooldown(&codes, numbered(crowd)).is_err());
+        // Who was counted apart still is.
+        assert!(state.check_cooldown(&codes, numbered(0)).is_ok());
+    }
+
+    #[test]
+    fn an_ipv6_client_is_its_network() {
+        let proxy = Some(address("127.0.0.1"));
+        assert_eq!(
+            client_address(proxy, Some("2001:db8:1:2:3:4:5:6")),
+            client_address(proxy, Some("2001:db8:1:ff::ffff"))
+        );
+        assert_ne!(
+            client_address(proxy, Some("2001:db8:1:2::1")),
+            client_address(proxy, Some("2001:db8:1:102::1"))
+        );
+        assert_eq!(
+            client_address(proxy, Some("::ffff:203.0.113.9")),
+            address("203.0.113.9")
+        );
     }
 }
