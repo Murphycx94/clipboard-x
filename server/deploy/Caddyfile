@@ -34,5 +34,7 @@
 }
 
 {$SYNC_NAME}.{$SYNC_ZONE}:{$SYNC_PORT} {
+	# Passes each client's address on (X-Forwarded-For): the server counts
+	# wrong admin and pairing codes by it.
 	reverse_proxy 127.0.0.1:8787
 }

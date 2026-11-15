@@ -8,6 +8,9 @@ use clipboardx_sync_proto::{
 };
 use rusqlite::{Connection, OptionalExtension, Result, params};
 
+/// Seconds between two notes of when a device was last seen.
+const SEEN_EVERY: i64 = 60;
+
 const SCHEMA: &str = "
     PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS devices (
@@ -107,7 +110,9 @@ impl Store {
         Ok(())
     }
 
-    /// The active device whose token hashes to `token_hash`, seen now.
+    /// The active device whose token hashes to `token_hash`, seen now
+    /// (noted once in [`SEEN_EVERY`] seconds: a device asks every few
+    /// seconds, and each note is a write to the disk).
     pub fn device_by_token(&self, token_hash: &str, now: i64) -> Result<Option<String>> {
         let id: Option<String> = self
             .conn
@@ -119,8 +124,10 @@ impl Store {
             .optional()?;
         if let Some(id) = &id {
             self.conn.execute(
-                "UPDATE devices SET last_seen = ?2 WHERE id = ?1",
-                params![id, now],
+                // Either way: a clock set back does not freeze it.
+                "UPDATE devices SET last_seen = ?2
+                 WHERE id = ?1 AND (last_seen <= ?2 - ?3 OR last_seen > ?2)",
+                params![id, now, SEEN_EVERY],
             )?;
         }
         Ok(id)
@@ -285,5 +292,30 @@ impl Store {
             })
         })?;
         rows.collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_device_is_noted_as_seen_now_and_then() {
+        let store = Store::in_memory().unwrap();
+        store.add_device("d", "Mac", "hash", 1_000).unwrap();
+        let seen = |store: &Store| store.devices().unwrap()[0].last_seen;
+        let found = |now| store.device_by_token("hash", now).unwrap();
+
+        assert_eq!(found(1_000), Some("d".to_owned()));
+        assert_eq!(seen(&store), 1_000);
+        // Every request finds the device; few move the time.
+        assert_eq!(found(1_000 + SEEN_EVERY - 1), Some("d".to_owned()));
+        assert_eq!(seen(&store), 1_000);
+        assert_eq!(found(1_000 + SEEN_EVERY), Some("d".to_owned()));
+        assert_eq!(seen(&store), 1_000 + SEEN_EVERY);
+        // A clock set back: noted again, not frozen at a time to come.
+        assert_eq!(found(500), Some("d".to_owned()));
+        assert_eq!(seen(&store), 500);
+        assert_eq!(store.device_by_token("other", 9_000).unwrap(), None);
     }
 }

@@ -9,7 +9,7 @@ use clipboardx_sync_proto::{
 use std::sync::Arc;
 
 use clipboardx_sync_server::{
-    AppState, Config, issue_pairing_code, new_state, router, store::Store,
+    AppState, Config, issue_pairing_code, new_state, serve, store::Store,
 };
 use futures_util::StreamExt;
 use reqwest::StatusCode;
@@ -26,7 +26,7 @@ async fn start(config: Config) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let served = state.clone();
-    tokio::spawn(async move { axum::serve(listener, router(served)).await.unwrap() });
+    tokio::spawn(async move { serve(listener, served).await.unwrap() });
     Server {
         base: format!("http://{addr}/v1"),
         admin: admin.unwrap(),
@@ -240,6 +240,66 @@ async fn wrong_codes_cool_down_without_voiding_the_users_code() {
     );
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(server.join(&code).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_strangers_wrong_codes_do_not_lock_the_user_out() {
+    let server = start(Config::default()).await;
+    let token = server.first_device().await;
+    let code = server.pair(&token).await;
+    // As the proxy on this machine reports who it speaks for.
+    let join_from = |address: &'static str, code: String| {
+        server
+            .http
+            .post(format!("{}/join", server.base))
+            .header("X-Forwarded-For", address)
+            .json(&JoinRequest {
+                code,
+                device_name: "Laptop".into(),
+            })
+            .send()
+    };
+    for _ in 0..5 {
+        let wrong = join_from("203.0.113.9", "AAAA-AAAA".into()).await.unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    }
+    let refused = join_from("203.0.113.9", code.clone()).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    let joined = join_from("198.51.100.7", code).await.unwrap();
+    assert_eq!(joined.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn code_requests_with_large_bodies_are_refused() {
+    let server = start(Config::default()).await;
+    let long_name = "x".repeat(64 * 1024);
+    let bootstrap = server
+        .http
+        .post(format!("{}/bootstrap", server.base))
+        .json(&BootstrapRequest {
+            admin_code: server.admin.clone(),
+            device_name: long_name.clone(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bootstrap.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let join = server
+        .http
+        .post(format!("{}/join", server.base))
+        .json(&JoinRequest {
+            code: "AAAA-AAAA".into(),
+            device_name: long_name,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    // Not counted as a wrong code, and the admin code is not spent.
+    assert_eq!(
+        server.bootstrap(&server.admin).await.status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

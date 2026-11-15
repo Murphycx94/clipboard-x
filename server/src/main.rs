@@ -10,7 +10,7 @@ use std::path::PathBuf;
 // The pairing code on SIGUSR1: Unix only.
 #[cfg(unix)]
 use clipboardx_sync_server::issue_pairing_code;
-use clipboardx_sync_server::{Config, new_state, router, store::Store};
+use clipboardx_sync_server::{Config, new_state, service, store::Store};
 
 const USAGE: &str = "usage: clipboardx-sync-server [--listen ADDR:PORT] [--data DIR]
   --listen   address to listen on (env CLIPBOARDX_SYNC_LISTEN, default 127.0.0.1:8787);
@@ -104,7 +104,7 @@ async fn main() -> std::process::ExitCode {
         let _ = tokio::signal::ctrl_c().await;
         log::info!("shutting down");
     };
-    match axum::serve(listener, router(state))
+    match axum::serve(listener, service(state))
         .with_graceful_shutdown(shutdown)
         .await
     {
