@@ -241,6 +241,22 @@ pub fn modal(
         )
 }
 
+/// The bar under the header for as long as the app runs on a database in
+/// memory: what is copied or saved now is gone when it quits.
+pub fn storage_banner() -> impl IntoElement {
+    view()
+        .px(px(16.0))
+        .py(px(8.0))
+        .border_b_1()
+        .border_color(move || theme().border)
+        .bg(move || theme().muted)
+        .child(
+            text("无法打开数据库：本次运行的历史、设置和密码本都不会保存。请检查磁盘空间和数据目录的权限，然后重新打开 ClipboardX。")
+                .text_xs()
+                .text_color(move || theme().destructive),
+        )
+}
+
 /// The toast at the bottom of the window.
 pub fn toast_layer(state: AppState) -> impl IntoElement {
     view()

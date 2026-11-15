@@ -50,6 +50,15 @@ pub enum VaultStatus {
     Unlocked,
 }
 
+/// An exported backup.
+#[derive(Debug)]
+pub struct Backup {
+    /// The file's content.
+    pub text: String,
+    /// Entries left out of it: they no longer decrypt.
+    pub unreadable: usize,
+}
+
 /// What an import does with the vault's entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportMode {
@@ -281,6 +290,18 @@ impl VaultService {
         })
     }
 
+    /// Fails while another device's newer header waits to be taken: what
+    /// this device would write (a new key, a new phrase) goes under it.
+    /// Before the password is checked, as checking it with the new one
+    /// takes that header, and this device's entries are not under its key
+    /// until the next sync.
+    fn refuse_under_a_staged_header(&self) -> Result<(), VaultError> {
+        if self.has_staged_header() {
+            return Err(VaultError::HeaderChanged);
+        }
+        Ok(())
+    }
+
     /// Moves the vault to a new data key under `password` (with the secret
     /// key and the recovery phrase given): every entry is encrypted again,
     /// so an old copy of the database opens none of them. The vault is left
@@ -294,23 +315,62 @@ impl VaultService {
         generation: u64,
     ) -> Result<(), VaultError> {
         let new_dek = SecretKey::random()?;
-        let rows = self
-            .db
-            .with_conn(store::load_entries)?
-            .into_iter()
-            // A corrupt entry stays as it was.
-            .filter_map(|row| self.reseal(old, &new_dek, &row, row.revision + 1).ok())
-            .collect::<Vec<_>>();
+        // The slow derivation first: nothing waits on the session for it.
         let meta = self.new_meta(password, &new_dek, account_key, phrase)?;
-        self.save_header(&meta, &rows, old)?;
+        // For the Touch ID copy, once the session holds the key itself.
+        let new_bytes = zeroize::Zeroizing::new(*new_dek.as_bytes());
+        {
+            // The session's key is held from reading the entries to
+            // replacing it: a save or a sync meanwhile waits, then works
+            // under the new key. What it wrote under the old one in between
+            // would open with nothing.
+            let mut session = self.key();
+            let entries = self.db.with_conn(store::load_entries)?;
+            let rows = entries
+                .iter()
+                .filter_map(|row| {
+                    let revision = row.revision + 1;
+                    match self.reseal(old, &new_dek, row, revision) {
+                        Ok(sealed) => Some(sealed),
+                        // A deletion's marker hides nothing to lose: it is
+                        // made again. (No list shows one to remove.)
+                        Err(_) if row.deleted => {
+                            let mut marker =
+                                Self::encrypt(&new_dek, &row.id, revision, None).ok()?;
+                            marker.synced_revision = row.synced_revision;
+                            marker.updated_at = row.updated_at.clone();
+                            Some(marker)
+                        }
+                        // A corrupt entry stays as it was.
+                        Err(_) => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            // Syncing, that would be for good, on every device: its record
+            // on the server stays under a key no header gives any more.
+            // So is one not fetched again yet since another device's new
+            // key.
+            if rows.len() < entries.len() && self.sync_state()?.is_some() {
+                return Err(VaultError::StaleEntries);
+            }
+            self.save_header(&meta, &rows, old)?;
+            if self.generation() == generation {
+                *session = Some(new_dek);
+                self.touch(now_ms());
+            } else {
+                // Locked meanwhile: the key changed all the same. Unlocked
+                // again since, or about to be, it would be with the old
+                // key, which opens nothing now.
+                self.lock_generation.fetch_add(1, Ordering::SeqCst);
+                *session = None;
+            }
+        }
         // A Touch ID copy follows the new key, or goes.
         if self.keys.get(KeyItem::DataKey).is_some()
-            && self.keys.put(KeyItem::DataKey, new_dek.as_bytes()).is_err()
+            && self.keys.put(KeyItem::DataKey, &new_bytes[..]).is_err()
         {
             self.keys.delete(KeyItem::DataKey);
         }
-        // Locked meanwhile: the key changed all the same.
-        let _ = self.open_session(new_dek, now_ms(), generation);
         Ok(())
     }
 
@@ -336,12 +396,11 @@ impl VaultService {
         password: &str,
         phrase: &RecoveryKey,
     ) -> Result<(), VaultError> {
+        self.refuse_under_a_staged_header()?;
         let generation = self.generation();
         let (meta, dek) = self.verify(password, now_ms())?;
-        // A newer header waits: what this device would write goes under it.
-        if self.has_staged_header() {
-            return Err(VaultError::HeaderChanged);
-        }
+        // One that came meanwhile.
+        self.refuse_under_a_staged_header()?;
         let account_key = self.account_key_for(&meta)?;
         if !meta.recovery_sealed.is_empty() {
             return self.rekey(
@@ -483,7 +542,18 @@ impl VaultService {
         if let Some(staged) = self.staged_header()
             && let Some(dek) = self.open_staged(&staged, password)
         {
-            self.promote_staged(&staged, None)?;
+            // An open session moves to the new key with it, and so does
+            // what it changed and did not upload (as when the new password
+            // is given at its own prompt): left on the old key, it would
+            // read nothing that comes from the server.
+            let for_session = SecretKey::from_slice(dek.as_bytes())?;
+            let mut session = self.key();
+            let unsent = session.as_ref().map(|old| (old, &dek));
+            self.promote_staged(&staged, unsent)?;
+            if session.is_some() {
+                *session = Some(for_session);
+            }
+            drop(session);
             let meta = self.meta()?.ok_or(VaultError::NotSetUp)?;
             return Ok((meta, dek));
         }
@@ -716,6 +786,17 @@ impl VaultService {
         Ok(sealed)
     }
 
+    /// Whether `row`, which the key does not open, only waits for the next
+    /// sync: after another device's new key was taken here, what the
+    /// server has comes under it then. Until then it looks corrupt and is
+    /// not: to delete it would delete it on every device, and a backup
+    /// would lack it for no reason.
+    fn awaits_sync(&self, row: &EntryRow) -> Result<bool, VaultError> {
+        Ok(!row.dirty
+            && row.synced_revision > 0
+            && self.sync_state()?.is_some_and(|sync| sync.last_seq == 0))
+    }
+
     /// The row of `id` sealing `entry` (`None`: deleted) at its next
     /// revision.
     fn next_row(
@@ -773,6 +854,12 @@ impl VaultService {
     /// Deletes entry `id`, leaving a deletion marker to sync.
     pub fn delete(&self, id: &str) -> Result<(), VaultError> {
         self.with_key(|key| {
+            if let Some(current) = self.db.with_conn(|c| store::load_entry(c, id))?
+                && Self::decrypt_row(key, &current).is_err()
+                && self.awaits_sync(&current)?
+            {
+                return Err(VaultError::StaleEntries);
+            }
             let row = self.next_row(key, id, None)?;
             Ok(self.db.with_conn(|c| store::upsert_entry(c, &row))?)
         })
@@ -804,8 +891,11 @@ impl VaultService {
     /// open none of them. The vault is left unlocked.
     pub fn change_password(&self, old: &str, new: &str) -> Result<(), VaultError> {
         check_strength(new)?;
+        self.refuse_under_a_staged_header()?;
         let generation = self.generation();
         let (meta, old_dek) = self.verify(old, now_ms())?;
+        // One that came meanwhile.
+        self.refuse_under_a_staged_header()?;
         let account_key = self.account_key_for(&meta)?;
         // The recovery phrase stays: it wraps the new data key.
         let phrase = Self::phrase_of(&meta, &old_dek);
@@ -818,25 +908,33 @@ impl VaultService {
         )
     }
 
-    /// Every entry, encrypted with `backup_password`; needs the master
-    /// password again.
-    pub fn export(&self, master: &str, backup_password: &str) -> Result<String, VaultError> {
+    /// Every readable entry, encrypted with `backup_password`; needs the
+    /// master password again. A corrupt entry is left out and counted: the
+    /// rest must still be saved from a vault going bad.
+    pub fn export(&self, master: &str, backup_password: &str) -> Result<Backup, VaultError> {
         check_strength(backup_password)?;
         let (_, dek) = self.verify(master, now_ms())?;
         let rows = self.db.with_conn(store::load_entries)?;
-        let entries = rows
-            .iter()
-            .filter(|row| !row.deleted)
-            .map(|row| {
-                let entry = Self::decrypt(&dek, row)?;
-                Ok(backup::BackupEntry {
+        let mut entries = Vec::new();
+        let mut unreadable = 0;
+        for row in rows.iter().filter(|row| !row.deleted) {
+            match Self::decrypt(&dek, row) {
+                Ok(entry) => entries.push(backup::BackupEntry {
                     id: row.id.clone(),
                     updated_at: entry.updated_at.clone(),
                     entry,
-                })
-            })
-            .collect::<Result<Vec<_>, VaultError>>()?;
-        backup::encode(&entries, backup_password, self.params)
+                }),
+                Err(_) if self.awaits_sync(row)? => return Err(VaultError::StaleEntries),
+                Err(_) => unreadable += 1,
+            }
+        }
+        if unreadable > 0 {
+            log::warn!("{unreadable} corrupt entries left out of the backup");
+        }
+        Ok(Backup {
+            text: backup::encode(&entries, unreadable, backup_password, self.params)?,
+            unreadable,
+        })
     }
 
     /// Imports a backup, atomically; how many entries it added or changed.
@@ -850,11 +948,20 @@ impl VaultService {
         if self.key().is_none() {
             return Err(VaultError::Locked);
         }
-        let entries = backup::decode(text, password)?;
+        let backup::Decoded {
+            entries,
+            unreadable,
+        } = backup::decode(text, password)?;
         if mode == ImportMode::Replace && entries.is_empty() {
             return Err(VaultError::InvalidBackup(
                 "备份中没有条目，未做任何更改".into(),
             ));
+        }
+        // Replacing deletes what the backup lacks, on every device.
+        if mode == ImportMode::Replace && unreadable > 0 {
+            return Err(VaultError::InvalidBackup(format!(
+                "这份备份导出时有 {unreadable} 个条目无法读取，并不完整：不能用它替换，请改用合并"
+            )));
         }
         self.with_key(|key| {
             self.db.with_conn(|c| {
@@ -1113,6 +1220,64 @@ mod tests {
         assert_eq!(v.get(&id).unwrap().password, "pw");
     }
 
+    #[test]
+    fn entries_saved_during_a_password_change_stay_readable() {
+        // A derivation slow enough for saves (as the sync thread makes) to
+        // land while it runs.
+        let v = VaultService::with_params(
+            Arc::new(Database::in_memory().unwrap()),
+            Box::new(MemoryKeyStore::default()),
+            KdfParams {
+                m: 32 * 1024,
+                t: 2,
+                p: 1,
+            },
+        );
+        v.setup("correct horse battery").unwrap();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let (started, saving) = std::sync::mpsc::channel();
+        let saved = std::thread::scope(|scope| {
+            let saver = scope.spawn(|| {
+                let mut ids = Vec::new();
+                while !done.load(Ordering::SeqCst) {
+                    ids.push(v.save(None, entry("during", "pw")).unwrap());
+                    let _ = started.send(());
+                    // Many saves in a derivation, not a table to wade through.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                ids
+            });
+            saving.recv().unwrap();
+            v.change_password("correct horse battery", "new pass phrase")
+                .unwrap();
+            done.store(true, Ordering::SeqCst);
+            saver.join().unwrap()
+        });
+        assert!(saved.len() > 1);
+        for id in &saved {
+            assert_eq!(v.get(id).unwrap().title, "during");
+        }
+    }
+
+    #[test]
+    fn a_password_change_outlived_by_a_lock_leaves_no_old_key_in_use() {
+        let v = service();
+        v.setup("correct horse battery").unwrap();
+        let id = v.save(None, entry("a", "pw")).unwrap();
+        // The change starts, then the vault is locked and unlocked again
+        // before it is through.
+        let generation = v.generation();
+        let (_, old) = v.verify("correct horse battery", 0).unwrap();
+        v.lock();
+        v.unlock("correct horse battery", 0).unwrap();
+        v.rekey(&old, "new pass phrase", None, None, generation)
+            .unwrap();
+        // The session held the old key, which opens nothing now.
+        assert_eq!(v.status(), VaultStatus::Locked);
+        v.unlock("new pass phrase", 0).unwrap();
+        assert_eq!(v.get(&id).unwrap().password, "pw");
+    }
+
     const PW: &str = "correct horse battery";
     const NEW_PW: &str = "brand new pass phrase";
 
@@ -1294,7 +1459,8 @@ mod tests {
         let id = a.save(None, entry("GitHub", "pw-1")).unwrap();
         let file = a
             .export("correct horse battery", "backup pass phrase")
-            .unwrap();
+            .unwrap()
+            .text;
         assert!(!file.contains("pw-1") && !file.contains("GitHub"));
 
         let b = service();
@@ -1321,13 +1487,49 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_entry_does_not_stop_the_export() {
+        let v = service();
+        v.setup("correct horse battery").unwrap();
+        let bad = v.save(None, entry("bad", "x")).unwrap();
+        v.save(None, entry("good", "pw")).unwrap();
+        v.db.with_conn(|c| {
+            c.execute(
+                "UPDATE vault_entries SET ciphertext = zeroblob(40) WHERE id = ?1",
+                [&bad],
+            )
+            .unwrap()
+        });
+        let backup = v
+            .export("correct horse battery", "backup pass phrase")
+            .unwrap();
+        assert_eq!(backup.unreadable, 1);
+        let decoded = backup::decode(&backup.text, "backup pass phrase").unwrap();
+        assert_eq!(decoded.unreadable, 1);
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].entry.title, "good");
+
+        // Replacing the vault with it would delete what it lacks, for good
+        // and on every device: only merging takes it.
+        assert!(matches!(
+            v.import(&backup.text, "backup pass phrase", ImportMode::Replace)
+                .unwrap_err(),
+            VaultError::InvalidBackup(_)
+        ));
+        assert_eq!(v.list().unwrap().len(), 2);
+        v.import(&backup.text, "backup pass phrase", ImportMode::Merge)
+            .unwrap();
+        assert_eq!(v.list().unwrap().len(), 2);
+    }
+
+    #[test]
     fn merge_keeps_the_newer_copy() {
         let a = service();
         a.setup("correct horse battery").unwrap();
         let id = a.save(None, entry("x", "old")).unwrap();
         let file = a
             .export("correct horse battery", "backup pass phrase")
-            .unwrap();
+            .unwrap()
+            .text;
         let mut e = a.get(&id).unwrap();
         e.password = "new".into();
         a.save(Some(&id), e).unwrap();
@@ -1349,7 +1551,8 @@ mod tests {
         ));
         let file = v
             .export("correct horse battery", "backup pass phrase")
-            .unwrap();
+            .unwrap()
+            .text;
         let tampered = file.replacen("\"ciphertext\": \"", "\"ciphertext\": \"AAAA", 1);
         assert_ne!(tampered, file);
         assert!(
@@ -1525,7 +1728,8 @@ mod tests {
         a.setup("correct horse battery").unwrap();
         let empty = a
             .export("correct horse battery", "backup pass phrase")
-            .unwrap();
+            .unwrap()
+            .text;
         a.save(None, entry("keep", "pw")).unwrap();
         assert!(matches!(
             a.import(&empty, "backup pass phrase", ImportMode::Replace)

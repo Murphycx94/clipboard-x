@@ -5,12 +5,12 @@
 //! Only ciphertext and the vault's header go over the wire; the vault
 //! ([`crate::vault`]) does the crypto and the verification.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clipboardx_sync_proto::{
     BootstrapRequest, Changes, Device, DeviceToken, ErrorBody, JoinRequest, PairingCode,
@@ -28,6 +28,15 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// How often to sync without news from the server.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RECONNECT_WAIT: Duration = Duration::from_secs(60);
+/// How long the events connection may say nothing before the server is
+/// asked whether it is still there, and how long its answer may take.
+const QUIET: Duration = Duration::from_secs(60);
+/// How long connecting to one of the server's addresses may take: another
+/// (IPv4 after an IPv6 that leads nowhere) gets its turn then.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a connection is kept for the next request: past a poll, and
+/// not so long that one from before a sleep or another network is tried.
+const KEPT_IDLE: Duration = Duration::from_secs(45);
 /// Rounds of push, pull and manifest before giving up on a busy server.
 const MAX_ROUNDS: usize = 3;
 
@@ -89,18 +98,31 @@ pub struct Client {
     http: Http,
 }
 
+/// The HTTP client every [`Client`] uses: its connections stay open from
+/// one sync to the next, where a client of its own each time would connect
+/// (and shake hands over TLS) every time.
+fn shared_http() -> Result<Http, VaultError> {
+    static HTTP: OnceLock<Http> = OnceLock::new();
+    if let Some(http) = HTTP.get() {
+        return Ok(http.clone());
+    }
+    let http = Http::builder()
+        .timeout(TIMEOUT)
+        .pool_idle_timeout(KEPT_IDLE)
+        // A redirect could carry a code or the token's request to a host
+        // api_base refuses.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(sync_error)?;
+    Ok(HTTP.get_or_init(|| http).clone())
+}
+
 impl Client {
     pub fn new(server_url: &str) -> Result<Client, VaultError> {
         Ok(Client {
             base: api_base(server_url)?,
             token: None,
-            http: Http::builder()
-                .timeout(TIMEOUT)
-                // A redirect could carry a code or the token's request to a
-                // host api_base refuses.
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(sync_error)?,
+            http: shared_http()?,
         })
     }
 
@@ -472,7 +494,13 @@ fn events_loop(vault: &dyn Fn() -> &'static VaultService, trigger: &Sender<()>) 
             thread::sleep(Duration::from_secs(5));
             continue;
         };
-        match listen(&client, trigger) {
+        // Sync still on, with the server this connection is to.
+        let still_on = || {
+            let state = vault().sync_state().ok().flatten();
+            state.is_some_and(|s| api_base(&s.server_url).is_ok_and(|base| base == client.base))
+        };
+        let connecting = Instant::now();
+        match listen(&client, trigger, QUIET, &still_on) {
             // The server closed it: reconnect, but not in a tight loop.
             Ok(()) => {
                 wait = Duration::from_secs(1);
@@ -480,6 +508,10 @@ fn events_loop(vault: &dyn Fn() -> &'static VaultService, trigger: &Sender<()>) 
             }
             Err(e) => {
                 log::debug!("sync events: {e}");
+                // One that lasted is no server turning them away.
+                if connecting.elapsed() > MAX_RECONNECT_WAIT {
+                    wait = Duration::from_secs(1);
+                }
                 thread::sleep(wait);
                 wait = (wait * 2).min(MAX_RECONNECT_WAIT);
             }
@@ -490,8 +522,45 @@ fn events_loop(vault: &dyn Fn() -> &'static VaultService, trigger: &Sender<()>) 
     }
 }
 
-/// One WebSocket session: each message wakes the sync loop.
-fn listen(client: &Client, trigger: &Sender<()>) -> Result<(), String> {
+/// A connection to the server of `uri` on which every read and write (the
+/// TLS and WebSocket handshakes among them) gives up after `timeout`, and
+/// connecting after [`CONNECT_TIMEOUT`].
+fn connect_tcp(uri: &tungstenite::http::Uri, timeout: Duration) -> Result<TcpStream, String> {
+    use std::net::ToSocketAddrs as _;
+    let host = uri.host().ok_or("no host in the server's address")?;
+    // An IPv6 address comes in brackets.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = uri.port_u16().unwrap_or(match uri.scheme_str() {
+        Some("wss") => 443,
+        _ => 80,
+    });
+    let mut failure = "the server's name has no address".to_owned();
+    for address in (host, port).to_socket_addrs().map_err(|e| e.to_string())? {
+        let connected = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).and_then(|stream| {
+            stream.set_read_timeout(Some(timeout))?;
+            stream.set_write_timeout(Some(timeout))?;
+            // Events are a few bytes each: sent as they come.
+            stream.set_nodelay(true)?;
+            Ok(stream)
+        });
+        match connected {
+            Ok(stream) => return Ok(stream),
+            Err(e) => failure = e.to_string(),
+        }
+    }
+    Err(failure)
+}
+
+/// One WebSocket session: each message wakes the sync loop. After `quiet`
+/// without one it ends if sync is no longer on (`still_on`), and asks the
+/// server for a sign of life: a connection cut without a word (a phone
+/// that slept, a network that changed) would otherwise wait for ever.
+fn listen(
+    client: &Client,
+    trigger: &Sender<()>,
+    quiet: Duration,
+    still_on: &dyn Fn() -> bool,
+) -> Result<(), String> {
     use tungstenite::client::IntoClientRequest as _;
     let mut request = client
         .events_url()
@@ -503,20 +572,36 @@ fn listen(client: &Client, trigger: &Sender<()>) -> Result<(), String> {
             .map_err(|_| "bad token".to_owned())?;
         request.headers_mut().insert("Authorization", value);
     }
-    let (mut socket, _) = tungstenite::connect(request).map_err(|e| e.to_string())?;
-    if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
-        // Wakes the loop to check sync is still on.
-        let _ = stream.set_read_timeout(Some(POLL_INTERVAL * 2));
-    }
+    let stream = connect_tcp(request.uri(), quiet)?;
+    let (mut socket, _) = tungstenite::client_tls(request, stream).map_err(|e| e.to_string())?;
+    let mut asked = false;
     loop {
         match socket.read() {
-            Ok(tungstenite::Message::Text(_)) => {
-                if trigger.send(()).is_err() {
+            Ok(tungstenite::Message::Close(_)) => return Ok(()),
+            Ok(message) => {
+                // Anything, its answer included, shows the server is there.
+                asked = false;
+                if message.is_text() && trigger.send(()).is_err() {
                     return Ok(());
                 }
             }
-            Ok(tungstenite::Message::Close(_)) => return Ok(()),
-            Ok(_) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if !still_on() {
+                    return Ok(());
+                }
+                if asked {
+                    return Err("the server stopped answering".into());
+                }
+                socket
+                    .send(tungstenite::Message::Ping(Default::default()))
+                    .map_err(|e| e.to_string())?;
+                asked = true;
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
@@ -524,7 +609,149 @@ fn listen(client: &Client, trigger: &Sender<()>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
+
+    /// Long enough for a busy machine to answer in, short enough to wait
+    /// through several times.
+    const SHORT: Duration = Duration::from_millis(300);
+
+    /// A client of a server on this machine that takes one events
+    /// connection and gives it to `serve`.
+    fn events_server(
+        serve: impl FnOnce(tungstenite::WebSocket<TcpStream>) + Send + 'static,
+    ) -> Client {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            serve(tungstenite::accept(stream).unwrap());
+        });
+        Client::new(&format!("http://{address}")).unwrap()
+    }
+
+    #[test]
+    fn a_quiet_connection_is_kept_while_the_server_answers() {
+        // Reading is what answers a ping.
+        let client = events_server(|mut socket| while socket.read().is_ok() {});
+        let (trigger, _triggered) = mpsc::channel();
+        let quiet_times = AtomicUsize::new(0);
+        let still_on = || quiet_times.fetch_add(1, Ordering::SeqCst) < 4;
+        assert_eq!(listen(&client, &trigger, SHORT, &still_on), Ok(()));
+        // Kept through four quiet times, ended when sync went off.
+        assert_eq!(quiet_times.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn the_real_server_answers_so_its_connection_is_kept() {
+        use clipboardx_sync_server::{Config, new_state, serve, store::Store};
+        let (state, admin) = new_state(Store::in_memory().unwrap(), Config::default()).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || runtime.block_on(async { serve(listener, state).await.unwrap() }));
+        let device = Client::new(&url)
+            .unwrap()
+            .bootstrap(&admin.unwrap(), "Mac")
+            .unwrap();
+        let client = Client::new(&url)
+            .unwrap()
+            .with_token(Zeroizing::new(device.token));
+
+        let (trigger, triggered) = mpsc::channel();
+        let quiet_times = AtomicUsize::new(0);
+        let still_on = || quiet_times.fetch_add(1, Ordering::SeqCst) < 4;
+        assert_eq!(listen(&client, &trigger, SHORT, &still_on), Ok(()));
+        assert_eq!(quiet_times.load(Ordering::SeqCst), 5);
+        // What the server says on connecting.
+        assert_eq!(triggered.try_iter().count(), 1);
+    }
+
+    #[test]
+    fn a_connection_that_stopped_answering_is_dropped() {
+        let (hang_up, hung_up) = mpsc::channel::<()>();
+        // Connected, then gone without a word: nothing reads the pings.
+        let client = events_server(move |_socket| {
+            let _ = hung_up.recv();
+        });
+        let (trigger, _triggered) = mpsc::channel();
+        let started = Instant::now();
+        let ended = listen(&client, &trigger, SHORT, &|| true);
+        assert_eq!(ended, Err("the server stopped answering".into()));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(hang_up);
+    }
+
+    #[test]
+    fn a_server_that_takes_the_connection_and_says_nothing_is_given_up_on() {
+        // Not even the WebSocket handshake.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (hang_up, hung_up) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let _held = listener.accept();
+            let _ = hung_up.recv();
+        });
+        let client = Client::new(&format!("http://{address}")).unwrap();
+        let (trigger, _triggered) = mpsc::channel();
+        let started = Instant::now();
+        assert!(listen(&client, &trigger, SHORT, &|| true).is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(hang_up);
+    }
+
+    #[test]
+    fn clients_share_their_connections() {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::AtomicUsize;
+        // An HTTP server that keeps connections open and counts them.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counted = connections.clone();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                counted.fetch_add(1, Ordering::SeqCst);
+                thread::spawn(move || {
+                    let mut request = [0_u8; 4096];
+                    while matches!(stream.read(&mut request), Ok(n) if n > 0) {
+                        let answer = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                                      content-length: 2\r\n\r\n[]";
+                        if stream.write_all(answer.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let url = format!("http://{address}");
+        // As each sync makes a client of its own.
+        for _ in 0..3 {
+            let client = Client::new(&url).unwrap();
+            assert!(client.devices().unwrap().is_empty());
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn events_wake_the_sync() {
+        let client = events_server(|mut socket| {
+            socket.send(tungstenite::Message::text("{}")).unwrap();
+            let _ = socket.close(None);
+            while socket.read().is_ok() {}
+        });
+        let (trigger, triggered) = mpsc::channel();
+        assert_eq!(listen(&client, &trigger, SHORT, &|| true), Ok(()));
+        assert_eq!(triggered.try_iter().count(), 1);
+    }
 
     #[test]
     fn plain_http_only_on_this_machine() {

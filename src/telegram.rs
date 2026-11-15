@@ -81,6 +81,12 @@ fn check(response: reqwest::blocking::Response, method: &str) -> Result<(), Stri
     Err(format!("{method} failed ({status}): {body}"))
 }
 
+/// A failed request's message, without its URL: that holds the bot's
+/// token, and the message goes to the log.
+fn network_error(error: reqwest::Error) -> String {
+    error.without_url().to_string()
+}
+
 fn photo_part(png: &[u8]) -> Result<multipart::Part, String> {
     multipart::Part::bytes(png.to_vec())
         .file_name("image.png")
@@ -117,7 +123,7 @@ pub fn sync_favorites(
             .post(url("sendMessage"))
             .json(&payload)
             .send()
-            .map_err(|e| e.to_string())?;
+            .map_err(network_error)?;
         check(response, "sendMessage")?;
     }
 
@@ -140,7 +146,7 @@ pub fn sync_favorites(
                 .post(url("sendPhoto"))
                 .multipart(form)
                 .send()
-                .map_err(|e| e.to_string())?;
+                .map_err(network_error)?;
             check(response, "sendPhoto")?;
             continue;
         }
@@ -165,7 +171,7 @@ pub fn sync_favorites(
             .post(url("sendMediaGroup"))
             .multipart(form)
             .send()
-            .map_err(|e| e.to_string())?;
+            .map_err(network_error)?;
         check(response, "sendMediaGroup")?;
     }
     Ok(())
@@ -229,6 +235,20 @@ mod tests {
             photo_caption(&item(Some("设计稿"))),
             "2026-03-17 14:32\n备注：设计稿"
         );
+    }
+
+    #[test]
+    fn network_errors_leave_the_token_out() {
+        // Nothing listens on port 1: the request fails, its URL attached.
+        let error = Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1/botSECRET-TOKEN/sendMessage")
+            .send()
+            .unwrap_err();
+        assert!(error.to_string().contains("SECRET-TOKEN"));
+        assert!(!network_error(error).contains("SECRET-TOKEN"));
     }
 
     #[test]

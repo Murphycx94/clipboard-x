@@ -64,6 +64,22 @@ impl DialogKind {
             DialogKind::VaultEditor | DialogKind::VaultConfirmDelete | DialogKind::SyncSecretKey
         )
     }
+
+    /// Dialogs that go when an unlocked vault locks: with those of
+    /// [`is_vault`](Self::is_vault), the ones showing a phrase or a pairing
+    /// code, or holding passwords typed and not sent yet (which would work
+    /// for whoever comes by). They also open over a locked vault, and stay
+    /// then.
+    pub fn closes_on_lock(self) -> bool {
+        self.is_vault()
+            || matches!(
+                self,
+                DialogKind::VaultPassword
+                    | DialogKind::VaultRecoveryPhrase
+                    | DialogKind::SyncPair
+                    | DialogKind::SyncNewPassword
+            )
+    }
 }
 
 /// What the vault password dialog does.
@@ -240,6 +256,41 @@ impl AppState {
             sync_devices: signal(Vec::new()),
             sync_prompted: signal(false),
         }
+        .forgetting_closed_dialogs()
+        .loading_the_archive_when_shown()
+    }
+
+    /// The archive is read when its page opens (and again by
+    /// [`reload`](Self::reload) while it shows), not with everything else.
+    fn loading_the_archive_when_shown(self) -> AppState {
+        effect(move || {
+            if self.page.get() == Page::Archive {
+                self.reload_archive();
+            }
+        });
+        self
+    }
+
+    /// What the sync dialogs showed goes with them, however they closed:
+    /// their buttons, Escape, the backdrop, a lock, the window hiding.
+    fn forgetting_closed_dialogs(self) -> AppState {
+        effect(move || {
+            let dialog = self.dialog.get();
+            if dialog != Some(DialogKind::SyncSecretKey) {
+                self.sync_secret.set(String::new());
+            }
+            // The setup form lasts through the secret key step.
+            if !matches!(
+                dialog,
+                Some(DialogKind::SyncSetup | DialogKind::SyncSecretKey)
+            ) {
+                self.sync_form.set(SyncForm::default());
+            }
+            if dialog != Some(DialogKind::SyncPair) {
+                self.sync_pair.set(None);
+            }
+        });
+        self
     }
 
     // --- Loading -------------------------------------------------------------
@@ -257,9 +308,9 @@ impl AppState {
                 Ok(items) => self.favorites.set(items),
                 Err(e) => report("favorites", e),
             }
-            match db.archive_groups() {
-                Ok(groups) => self.archive.set(groups),
-                Err(e) => report("the archive", e),
+            // The whole history before today: only while its page shows.
+            if untracked(move || self.page.get()) == Page::Archive {
+                self.reload_archive();
             }
             match db.settings() {
                 Ok(settings) => self.settings.set(settings),
@@ -270,6 +321,13 @@ impl AppState {
                 self.focused.set(count.saturating_sub(1));
             }
         });
+    }
+
+    fn reload_archive(self) {
+        match services().db().archive_groups() {
+            Ok(groups) => self.archive.set(groups),
+            Err(e) => log::error!("cannot load the archive: {e}"),
+        }
     }
 
     /// Reloads when the data changed and resets the panel when the host
@@ -288,6 +346,7 @@ impl AppState {
                 seen_shown.set(shown);
                 self.on_shown();
             }
+            services().cleanup_when_due(crate::vault::now_ms());
             self.watch_vault();
         });
     }
@@ -337,6 +396,16 @@ impl AppState {
 
     pub fn error(self, message: impl Into<String>) {
         self.toast(ToastKind::Error, message);
+    }
+
+    /// Whether a vault made now would be kept; says why not otherwise (the
+    /// database could not be opened: see `Services::storage_failure`).
+    pub fn can_keep_a_vault(self) -> bool {
+        let kept = services().storage_failure().is_none();
+        if !kept {
+            self.error("数据库无法打开，密码本无法保存：请解决后重新打开 ClipboardX");
+        }
+        kept
     }
 
     /// Reports `result`'s error, if any; whether it succeeded.
