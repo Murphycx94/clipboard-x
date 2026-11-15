@@ -1,14 +1,14 @@
 # ClipboardX
 
-一款桌面剪贴板历史管理工具：自动记录复制过的文本与图片，用全局快捷键随时唤出，支持收藏、备注、历史归档与 Telegram 同步。
+一款剪贴板历史管理工具（macOS 桌面版与安卓版）：自动记录复制过的文本与图片，用全局快捷键随时唤出，支持收藏、备注、历史归档与 Telegram 同步，并带一个可在设备间同步的加密密码本。
 
-本分支（`feat/nsh`）用 [Native Shell (NSH)](https://nsh.dev) 以纯 Rust 重写了原 Tauri + React 版本（见 `main` 分支）：界面是 NSH 组件（macOS 上由 AppKit 原生绘制），不再有 WebView、Node 与前端构建链。
+用 [Native Shell (NSH)](https://nsh.dev) 以纯 Rust 写成（最初是 Tauri + React，已重写）：界面是 NSH 组件（macOS 上由 AppKit 原生绘制），没有 WebView、Node 与前端构建链。
 
 ---
 
 ## 功能
 
-1. **全量历史记录**：每 500ms 读取一次剪贴板，记录文本与图片；内容按哈希去重，重复复制的条目移到最前
+1. **全量历史记录**：每 500ms 查看一次剪贴板（macOS 和 Windows 上先看系统的变更计数，没有变化就不读内容），记录文本与图片；内容按哈希去重，重复复制的条目移到最前。图片先快速保存，再在后台无损压缩
 2. **快捷键唤出**：默认 `Cmd+Shift+V`（Windows 为 `Alt+Shift+V`，Linux 为 `Ctrl+Shift+V`），可在设置中修改，保存后立即生效
 3. **今日历史 / 收藏夹**：内容按时间倒序排列，支持搜索（文本与备注）和"只看图片"
 4. **历史归档**：非当日内容按日期分组折叠，点击展开
@@ -40,14 +40,14 @@
 
 - **加密**：随机生成的 256 位密钥以 XChaCha20-Poly1305 加密每个条目（名称在内的所有字段），条目 id 作为附加认证数据；该密钥再由主密码经 Argon2id（64 MiB、3 轮）派生的密钥包装后存入 SQLite。数据库里没有明文。
 - **解锁**：主密码；连续输错 3 次后等待时间逐次翻倍（最长 60 秒，重启不清零），修改主密码、开启 Touch ID、导出时的密码校验同样计数。可在设置中开启 Touch ID（失败可用系统密码），只接受属于本密码本的密钥。
-- **自动锁定**：无操作 1/5/15/30 分钟后、收起面板时（可关）、系统睡眠或锁屏时。
+- **自动锁定**：无操作 1/5/15/30 分钟后、收起面板时（可关）、系统睡眠或锁屏时。锁定时，显示助记词、秘密密钥或配对码的对话框，以及已填入密码尚未提交的对话框，会一并关闭。
 - **复制**：复制的账号、密码和验证码带有 `org.nspasteboard.ConcealedType` 标记，ClipboardX 和其他遵守约定的剪贴板工具都不会记录；30 秒后若剪贴板内容未变则自动清空。ClipboardX 也不再记录 1Password 等工具复制出的密码。
 - **两步验证**：粘贴 `otpauth://` 链接或 Base32 密钥，列表中显示当前验证码与剩余秒数，点击复制。
 - **密码生成器**：长度 12/16/20/32，可选大写、小写、数字、符号，可排除易混淆字符。
 - **修改主密码**：同时更换数据密钥并重新加密全部条目，旧密码配合旧的数据库备份也无法再解开。
 - **恢复助记词**：忘记主密码时，在解锁页点"忘记主密码？"，输入助记词（空格可有可无）并设置新主密码，全部条目保留；未开同步时还会同时更换数据密钥。助记词是 256 位随机数，用 BIP39 简体中文词表写成 24 个字，最后一个字含校验，抄错一个字会被识别。密码本只保存"用助记词包装的数据密钥"和"用数据密钥加密的助记词"（后者用于修改主密码后自动重新包装），**任何地方都不保存助记词明文**。修改主密码后助记词仍然有效。设置中可为旧密码本生成，或重新生成：重新生成会同时更换数据密钥，旧助记词即使配上旧的数据库或服务器备份也打不开新内容。
   - **风险**：助记词等同于主密码加秘密密钥，拿到它的人可以直接打开密码本，所以只抄在纸上，不要截图、拍照或存进网盘、备忘录。256 位无法暴力破解，汉字词表与英文词表强度相同，真正的风险只在抄写的纸张泄露。怀疑泄露时，在设置中重新生成，并修改重要账号的密码。
-- **加密备份**：设置中导出为 `.cxvault`（需先输入主密码；用备份密码另行派生密钥加密），导入时可选合并（同一条目保留较新的）或替换。
+- **加密备份**：设置中导出为 `.cxvault`（需先输入主密码；用备份密码另行派生密钥加密），导入时可选合并（同一条目保留较新的）或替换。有条目损坏无法读取时，其余条目仍可导出并提示缺少的数量；这样的备份只能合并导入，不能用来替换。
 - 密码本内容不会进入 Telegram 同步、日志或错误信息。
 
 **已知限制**：
@@ -64,20 +64,20 @@
 
 - **两把钥匙**：开启同步时生成 128 位的**秘密密钥**（形如 `CX-XXXXX-…`），与主密码一起经 Argon2id（keyed 模式）派生出加密密钥。秘密密钥只保存在本机钥匙串和你自己的记录里，从不上传。所以服务器数据即使被拿走，没有秘密密钥也无法尝试猜主密码。
 - **服务器只存密文**：存的是每条记录的密文（附加认证数据中带"id:修订号"）、包装后的数据密钥，以及一份用数据密钥加密的**清单**（所有记录的 id 和修订号，版本号只增不减）。服务器若回滚、隐藏、替换旧版本或伪造删除，客户端会拒绝本次同步，本机数据保持不变。
-- **网络**：服务器只监听 Tailscale 地址，不开放端口、不需要 DDNS。客户端只允许以明文 http 访问 Tailscale 地址（`100.64.0.0/10`、`*.ts.net`）和本机，其他地址必须使用 https。
-- **设备**：设备令牌与加密密钥无关，令牌泄露最多只能读写密文。第一台设备用服务器打印的一次性管理码注册，其他设备用 10 分钟有效的配对码加入，可随时吊销。
-- **实时**：WebSocket 推送变更，断线时每 30 秒轮询一次。只在密码本解锁时同步，解锁后立即同步一次。
+- **网络**：服务器只监听本机，前面由 Caddy 在你的域名上提供 HTTPS（见部署说明）。客户端只允许以明文 http 访问本机（`127.0.0.1`、`localhost`），其他地址必须使用 https。
+- **设备**：设备令牌与加密密钥无关，令牌泄露最多只能读写密文。第一台设备用服务器打印的一次性管理码注册，其他设备用 10 分钟有效的配对码加入，可随时吊销。管理码和配对码连续输错 5 次后，该来源地址需等待 1 分钟，其他地址不受影响。
+- **实时**：WebSocket 推送变更，连接一分钟没有消息时向服务器确认它仍在，断开后自动重连；另外每 30 秒轮询一次。只在密码本解锁时同步，解锁后立即同步一次。
 - **冲突**：两台设备同时修改同一条时，以先上传的为准，另一版另存为"（冲突副本）"，由你决定保留哪个。
-- **修改主密码**：新头部会附带用旧数据密钥加密的认证值。其他设备核对无误后提示输入新主密码，本机尚未同步的修改一并保留。服务器伪造的头部不会替换本机的任何东西。
+- **修改主密码**：新头部会附带用旧数据密钥加密的认证值。其他设备核对无误后提示输入新主密码，本机尚未同步的修改一并保留。服务器伪造的头部不会替换本机的任何东西。其他设备改过主密码后，本机要先输入新主密码并完成一次同步，才能再修改主密码或重新生成助记词。
 
 **已知限制**：
 
 - **新设备只凭助记词恢复**：加入同步后，在解锁页点"忘记主密码？"，输入助记词和新主密码即可，不需要旧主密码，也不需要秘密密钥（它也由助记词包装，恢复时一并写回本机钥匙串）。其他设备会提示输入新主密码。所有设备都丢失时，在服务器上执行 `sudo systemctl kill -s USR1 clipboardx-sync`，日志里会打印一个配对码，新设备用它加入（见 [server/deploy/README.md](server/deploy/README.md)）。
 - 别的设备设置助记词后，头部会附带用当前数据密钥加密的认证值，其他设备直接采用，不必重新输入主密码。每个头部还带有用它自己的数据密钥封住的摘要（含版本号），所以服务器既不能去掉或换掉助记词字段，也不能把旧头部改个版本号冒充新的。
+- 其他设备改过主密码、本机输入新主密码之后，在下一次同步完成之前，本机的条目会暂时显示为"已损坏"。这期间不能删除它们，也不能导出备份；同步完成后恢复正常。
 - 主密码或秘密密钥丢失、没有其他已解锁的设备、也没有设置助记词时，数据无法恢复。
 - 服务器能看到记录数量、密文大小和修改时间，以及密码本是否设置了助记词。
 - 设备令牌泄露后，持有者读不到明文，但能覆盖或损坏服务器上的密文，使同步中断（本机数据不受影响）。应及时吊销该设备，并定期备份服务器数据库。
-- 服务器地址建议使用 Tailscale 的 MagicDNS 名（`*.ts.net`）。Tailscale 未连接时，`100.x` 地址可能经运营商网络以明文发出。
 
 ---
 
@@ -88,7 +88,7 @@
 ```sh
 cargo run                      # 完整桌面应用：菜单栏图标 + 全局快捷键 + 浮动面板
 CLIPBOARDX_SHOW=1 cargo run    # 启动时直接显示面板
-cargo test                     # 单元测试 + 无头 UI 测试（tests/ui.rs）
+cargo test --workspace         # 应用、同步服务器与协议的单元测试，无头 UI 测试，端到端同步测试
 nsh run                        # NSH 开发运行器：普通窗口，无菜单栏图标与全局快捷键
 nsh check
 ```
@@ -104,7 +104,9 @@ nsh check
 
 数据库在 macOS 上仍是 `~/Library/Application Support/com.clipboardx.app/clipboardx.db`（Windows 上是 `%APPDATA%\com.clipboardx.app\clipboardx.db`），表结构与 Tauri 版相同，旧版的历史、收藏和设置会直接沿用。
 
-## 打包（macOS）
+## 打包
+
+macOS：
 
 ```sh
 scripts/bundle-macos.sh                 # dist/ClipboardX.app（仅菜单栏，无 Dock 图标），ad-hoc 签名
@@ -113,9 +115,14 @@ scripts/bundle-macos.sh --universal --dmg   # Apple 芯片 + Intel 通用版（�
 SIGN_IDENTITY="Developer ID Application: …" scripts/bundle-macos.sh --dmg
 ```
 
-## 打包（Windows）
+安卓（需要 `nsh` 命令、JDK 和 Android SDK/NDK）：
 
-在 Windows 上（需要 Visual Studio 的 C++ 生成工具；安装包另需 [Inno Setup 6](https://jrsoftware.org/isinfo.php)）：
+```sh
+scripts/package-android.sh              # dist/ClipboardX-<版本>-android.apk（arm64-v8a 与 armeabi-v7a），调试签名
+ANDROID_KEYSTORE=… ANDROID_KEY_ALIAS=… NSH_KEYSTORE_PASSWORD=… scripts/package-android.sh --release
+```
+
+Windows（在 Windows 上打包；需要 Visual Studio 的 C++ 生成工具，安装包另需 [Inno Setup 6](https://jrsoftware.org/isinfo.php)）：
 
 ```powershell
 scripts\package-windows.ps1               # dist\ClipboardX-<版本>-windows-x86_64.zip 与 …-setup.exe
@@ -130,9 +137,9 @@ scripts\package-windows.ps1 -NoInstaller  # 只出免安装的 zip
 
 `.github/workflows/ci.yml`：
 
-- **每次推送**：在 macOS 和 Windows 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test`（含无头 UI 测试）；同时打包 macOS 通用版（`.dmg` 和 `.app` 压缩包）、Windows 安装包与免安装 zip、安卓 `.apk` 和同步服务端，作为工作流产物（Actions 页面的 Artifacts）供下载。只改文档（`docs/`、`*.md`）的推送不触发。
+- **每次推送**：在 macOS 和 Windows 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test --workspace`（含无头 UI 测试和端到端同步测试），并扫描提交里的密钥；同时打包 macOS 通用版（`.dmg` 和 `.app` 压缩包）、Windows 安装包与免安装 zip、安卓 APK 和同步服务器（Linux 静态编译），作为工作流产物（Actions 页面的 Artifacts）供下载。只改文档（`docs/`、`*.md`）的推送不触发。
 - **PR**：没有单独的一轮，页面上显示的是分支那次推送的结果（来自 fork 的 PR 因此不会被检查）。
-- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，等检查和打包全部通过后自动打标签并发布 GitHub Release，附带上面四种包。应用内的"检查更新"读取的就是这里的最新版本。
+- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，等检查和打包全部通过后自动打标签并发布 GitHub Release，附带以上四种产物。应用内的"检查更新"读取的就是这里的最新版本。
 - **发新版本的步骤**：同时修改 `Cargo.toml` 和 `nsh.json` 的 `version`（两处不一致时 CI 会失败），然后合并到 `main`。
 
 `nsh package --target macos` 也能打包，但它使用 NSH 生成的通用运行器，没有菜单栏图标、全局快捷键和浮动面板，只适合预览界面。
@@ -140,6 +147,7 @@ scripts\package-windows.ps1 -NoInstaller  # 只出免安装的 zip
 ## 平台支持
 
 - **macOS 14+**：完整支持。应用以浮动面板运行：不抢占前台应用的焦点，在鼠标所在屏幕的右侧显示，所有桌面空间可见。
+- **Android 8+**：同一套界面的手机布局。应用回到前台时读取剪贴板（仅文本，历史只存本机）；密码本与桌面端互通，支持云同步、恢复助记词和指纹/面容解锁。
 - **Windows 10 1809+ / Windows 11**（64 位）：托盘图标、全局快捷键唤出的置顶面板（显示在鼠标所在屏幕的右侧）、失焦隐藏、防截屏（Windows 10 2004 起从截图中消失，更早的版本显示为黑块）、锁屏/注销/睡眠时锁定密码本、Windows Hello 解锁、不记录其他密码管理器标记为敏感的复制内容、单实例（再次启动只是唤出已运行的面板）。圆角仅 Windows 11 有。由 CI 编译和测试；托盘、快捷键、Windows Hello 等交互需要在真机上验证，清单见 `docs/superpowers/specs/2026-11-14-windows-client-design.md`。
 - **Linux**：`src/main.rs` 会以 NSH 的普通窗口运行同一套界面和剪贴板记录，但尚未接入托盘图标、全局快捷键和失焦隐藏，也未编译验证。
 
@@ -152,8 +160,10 @@ ClipboardX/
 ├── Cargo.toml
 ├── nsh.json               # NSH 应用配置：根组件 App、主题、图标
 ├── theme.json             # 设计令牌（shadcn cssVars 格式），浅色/深色两套
+├── build.rs               # 安卓：把 android/java 编译成运行时加载的 dex
 ├── assets/                # 应用图标
-├── scripts/bundle-macos.sh
+├── android/java/          # 安卓的 Java 桥（Keystore、生物识别、剪贴板标记）
+├── scripts/               # bundle-macos.sh、package-android.sh、try-sync.sh
 ├── src/
 │   ├── lib.rs             # 模块声明、NSH 根组件注册、root()
 │   ├── main.rs            # 桌面入口：初始化日志与剪贴板监听，启动宿主
@@ -161,8 +171,10 @@ ClipboardX/
 │   ├── windows_host.rs    # Windows 宿主：置顶面板、托盘图标、全局快捷键、失焦隐藏、锁屏监听、单实例
 │   ├── model.rs           # 数据类型与纯函数（过滤、按日分组、掩码、标签）
 │   ├── db.rs              # SQLite 存取（历史与设置）
-│   ├── capture.rs         # 剪贴板轮询、PNG 编码与缩略图、复制回剪贴板
+│   ├── capture/           # 去重、PNG 编码与缩略图；desktop.rs 轮询桌面剪贴板，android.rs 是手机端
+│   ├── android/           # 安卓：经 JNI 调用 Java 桥
 │   ├── services.rs        # UI 与宿主共享的服务（数据库、变更计数、窗口桥接、同步）
+│   ├── system_prompt.rs   # 系统弹窗（如 Touch ID）期间保持面板不收起
 │   ├── telegram.rs        # 收藏同步到 Telegram
 │   ├── updater.rs         # 通过 GitHub Releases 检查新版本
 │   ├── hotkey.rs          # 快捷键字符串解析与校验
@@ -174,9 +186,10 @@ ClipboardX/
 │       ├── state.rs       # 界面状态（signals）与操作
 │       ├── keys.rs        # 键盘快捷键
 │       ├── header.rs  main_panel.rs  item_row.rs  archive.rs  settings.rs  dialogs.rs
-│       ├── vault/         # 密码本页面：锁屏、列表、编辑器、对话框
+│       ├── mobile.rs  foreground.rs   # 手机布局；回到前台时读取剪贴板
+│       ├── vault/         # 密码本页面：锁屏、列表、编辑器、对话框、云同步
 │       └── widgets.rs  icons.rs
-├── tests/ui.rs            # 无头 UI 测试（nsh-testing）
+├── tests/ui.rs  keyboard_ui.rs  mobile_ui.rs   # 无头 UI 测试（nsh-testing）
 ├── tests/vault_ui.rs      # 密码本无头 UI 测试
 ├── tests/sync_e2e.rs      # 两台设备经真实服务器同步的端到端测试
 ├── tests/sync_ui.rs       # 从设置页开启云同步的无头 UI 测试
@@ -186,7 +199,7 @@ ClipboardX/
 
 ### 线程模型
 
-- NSH 组件运行在引擎线程；macOS 宿主（AppKit、托盘、快捷键）运行在主线程；剪贴板监听与 Telegram 同步各自运行在独立线程。
+- NSH 组件运行在引擎线程；macOS 宿主（AppKit、托盘、快捷键）运行在主线程；剪贴板监听、图片压缩、密码本同步与 Telegram 同步各自运行在独立线程。
 - 它们只通过 `services.rs` 交互：界面每 300ms 读取一次原子计数器（数据是否变化、窗口是否被唤出）；界面通过 `WindowHost` 让宿主隐藏窗口或注册新快捷键，调用会投递到主线程执行。
 
 ## 与 Tauri 版的差异
