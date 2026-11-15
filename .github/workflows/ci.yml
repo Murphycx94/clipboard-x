@@ -124,7 +124,13 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
-          elif git ls-remote --tags origin "refs/tags/v$version" | grep -q .; then
+            exit 0
+          fi
+          # A lookup that fails has to fail this step: taken for "no such
+          # tag", it would release again, over the files of a version that
+          # is already published.
+          tags=$(git ls-remote --tags origin "refs/tags/v$version")
+          if [ -n "$tags" ]; then
             echo "v$version is already released"
             echo "should_release=false" >> "$GITHUB_OUTPUT"
           else
