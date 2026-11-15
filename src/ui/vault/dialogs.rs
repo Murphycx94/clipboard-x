@@ -1,6 +1,7 @@
 //! The vault's dialogs: the editor, deleting, passwords and resetting.
 
 use nsh_base::theme;
+use nsh_core::platform::Os;
 use nsh_core::prelude::*;
 
 use crate::vault::ImportMode;
@@ -118,6 +119,11 @@ fn password_dialog(state: AppState) -> impl IntoElement {
         VaultPurpose::EnableTouchId if is_touch() => (
             "开启指纹/面容解锁",
             "输入主密码，再验证指纹或面容。",
+            "开启",
+        ),
+        VaultPurpose::EnableTouchId if matches!(os(), Os::Windows) => (
+            "开启 Windows Hello",
+            "输入主密码以开启 Windows Hello 解锁。",
             "开启",
         ),
         VaultPurpose::EnableTouchId => {

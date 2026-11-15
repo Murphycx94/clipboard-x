@@ -66,8 +66,32 @@ security-framework = "3.7.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux = { version = "0.5.0", default-features = false }
 
+# The Windows host's panel, the sealed key files (DPAPI), Windows Hello and
+# the clipboard's formats. `windows` is NSH's own version, with the
+# features the host adds to it.
 [target.'cfg(target_os = "windows")'.dependencies]
 nsh-platform-windows = { version = "0.5.0", default-features = false }
+clipboard-win = "5.4"
+windows-future = "0.3"
+windows = { version = "0.62", features = [
+    "Security_Credentials_UI",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_System_Ole",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_System_WinRT",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# The executable's icon and manifest (built on Windows only).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [dev-dependencies]
 clipboardx-sync-server = { path = "server" }

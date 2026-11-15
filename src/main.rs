@@ -1,11 +1,13 @@
 //! The desktop app: the UI of the `clipboardx` crate in a window of its
-//! own. On macOS a floating panel that a global shortcut and a menu-bar
-//! icon show and hide; elsewhere NSH's standard window.
+//! own. On macOS and Windows a floating panel that a global shortcut and
+//! a menu-bar or tray icon show and hide; on Linux NSH's standard window.
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows_host;
 
 #[cfg(not(target_os = "android"))]
 use std::process::ExitCode;
@@ -19,6 +21,11 @@ const WINDOW_SIZE: (i32, i32) = (420, 600);
 
 #[cfg(not(target_os = "android"))]
 fn main() -> ExitCode {
+    // A second launch only brings the running one's panel up.
+    #[cfg(target_os = "windows")]
+    if windows_host::hand_over_to_running_instance() {
+        return ExitCode::SUCCESS;
+    }
     clipboardx::startup();
     services().start_capture();
     services().start_sync_worker();
@@ -30,12 +37,14 @@ fn run() -> ExitCode {
     macos::run(WINDOW_SIZE)
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn run() -> ExitCode {
-    #[cfg(target_os = "linux")]
+    windows_host::run(WINDOW_SIZE)
+}
+
+#[cfg(target_os = "linux")]
+fn run() -> ExitCode {
     use nsh_platform_linux as platform;
-    #[cfg(target_os = "windows")]
-    use nsh_platform_windows as platform;
 
     platform::run_app(
         platform::AppSource::Rust(clipboardx::root()),

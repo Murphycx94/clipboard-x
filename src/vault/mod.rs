@@ -12,6 +12,8 @@ pub mod recovery;
 pub mod store;
 pub mod sync;
 pub mod totp;
+#[cfg(target_os = "windows")]
+pub mod windows_store;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};

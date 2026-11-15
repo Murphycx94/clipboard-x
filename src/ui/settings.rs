@@ -1,6 +1,7 @@
 //! The settings page.
 
 use nsh_base::{SwitchElement, switch, theme};
+use nsh_core::platform::Os;
 use nsh_core::prelude::*;
 
 use crate::model::{RETENTION_OPTIONS, ThemePreference, VAULT_LOCK_OPTIONS, hotkey_label};
@@ -186,10 +187,15 @@ fn vault_section(state: AppState) -> impl IntoElement {
             .into_element(),
         ];
         if services().vault().touch_id_available() {
-            let (title, description) = if is_touch() {
-                ("指纹/面容解锁", "用指纹或面容代替主密码")
-            } else {
-                ("Touch ID 解锁", "用 Touch ID 或系统密码代替主密码")
+            let (title, description) = match os() {
+                Os::Android | Os::Ios => ("指纹/面容解锁", "用指纹或面容代替主密码"),
+                Os::Windows => (
+                    "Windows Hello 解锁",
+                    "用 Windows Hello（面容、指纹或 PIN）代替主密码",
+                ),
+                Os::MacOs | Os::Linux | Os::Web => {
+                    ("Touch ID 解锁", "用 Touch ID 或系统密码代替主密码")
+                }
             };
             rows.push(
                 row(

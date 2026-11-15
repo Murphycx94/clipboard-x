@@ -204,7 +204,8 @@ mod mac {
 /// then live in memory, without Touch ID.
 pub const NO_KEYCHAIN_ENV: &str = "CLIPBOARDX_NO_KEYCHAIN";
 
-/// The platform's store; Android's keeps its sealed files in `data_dir`.
+/// The platform's store; Android's and Windows' keep their sealed files in
+/// `data_dir`.
 pub fn platform(data_dir: &std::path::Path) -> Box<dyn KeyStore> {
     if std::env::var_os(NO_KEYCHAIN_ENV).is_some() {
         return Box::new(MemoryKeyStore::without_auth());
@@ -221,7 +222,13 @@ pub fn platform(data_dir: &std::path::Path) -> Box<dyn KeyStore> {
             crate::android::KeystoreSealer,
         ))
     }
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(super::windows_store::WindowsKeyStore::new(
+            data_dir.join("keys"),
+        ))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "windows")))]
     {
         let _ = data_dir;
         Box::new(MemoryKeyStore::without_auth())
