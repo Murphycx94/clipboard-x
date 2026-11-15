@@ -289,8 +289,10 @@ impl Host {
         }
     }
 
-    /// The tray icon was clicked: toggles, unless the click itself just hid
-    /// the panel (by taking the keyboard away) or is a double click's second.
+    /// The tray icon was clicked: shows the panel or hides it, unless the
+    /// click itself just hid it (by taking the keyboard away) or is a
+    /// double click's second. The click took the keyboard to the taskbar,
+    /// so a panel that is shown hides whether it had the keyboard or not.
     fn tray_clicked(&self) {
         let now = Instant::now();
         let settling = self
@@ -298,8 +300,13 @@ impl Host {
             .get()
             .is_some_and(|at| now.duration_since(at) < TRAY_SETTLE);
         self.settled.set(Some(now));
-        if !settling {
-            self.toggle();
+        if settling {
+            return;
+        }
+        if self.is_shown() {
+            self.hide();
+        } else {
+            self.show();
         }
     }
 

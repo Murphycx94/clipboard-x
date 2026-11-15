@@ -7,7 +7,10 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use clipboardx_sync_server::{Config, issue_pairing_code, new_state, router, store::Store};
+// The pairing code on SIGUSR1: Unix only.
+#[cfg(unix)]
+use clipboardx_sync_server::issue_pairing_code;
+use clipboardx_sync_server::{Config, new_state, router, store::Store};
 
 const USAGE: &str = "usage: clipboardx-sync-server [--listen ADDR:PORT] [--data DIR]
   --listen   address to listen on (env CLIPBOARDX_SYNC_LISTEN, default 127.0.0.1:8787);
