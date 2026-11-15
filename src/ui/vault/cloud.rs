@@ -117,6 +117,9 @@ impl AppState {
 
     /// Joins with a pairing code: the vault comes from the server, locked.
     fn sync_join(self, form: SyncForm) {
+        if !self.can_keep_a_vault() {
+            return;
+        }
         self.run_vault(
             move || {
                 let vault = services().vault();

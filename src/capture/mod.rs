@@ -20,7 +20,7 @@ mod android;
 #[cfg(target_os = "android")]
 pub use android::{copy_item, copy_secret};
 
-use image::codecs::png::PngEncoder;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder, RgbaImage};
 use sha2::{Digest, Sha256};
 
@@ -51,18 +51,32 @@ impl Captured {
         }
     }
 
-    /// Stores it.
-    pub fn store(&self, db: &Database, hash: &str) -> Result<(), String> {
+    /// Stores it. What was copied before only moves to now: an image is
+    /// not encoded for that.
+    pub fn store(&self, db: &Database, hash: &str) -> Result<Stored, String> {
+        if db.touch_item(hash).map_err(|e| e.to_string())? {
+            return Ok(Stored::Moved);
+        }
         match self {
-            Captured::Text(text) => db.insert_text(text, hash).map_err(|e| e.to_string()),
+            Captured::Text(text) => db.insert_text(text, hash),
             Captured::Image(image) => {
                 let png = encode_png(image)?;
                 let thumbnail = encode_png(&make_thumbnail(image))?;
                 db.insert_image(&png, &thumbnail, hash)
-                    .map_err(|e| e.to_string())
             }
         }
+        .map_err(|e| e.to_string())?;
+        Ok(Stored::Added)
     }
+}
+
+/// How something copied got into the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    /// As a new item.
+    Added,
+    /// It was there: moved to now.
+    Moved,
 }
 
 /// How long a copied secret stays on the clipboard.
@@ -119,19 +133,28 @@ impl Recorder {
     }
 
     /// Stores `captured` unless it is what was seen last or a secret we
-    /// copied; whether it stored it.
-    pub fn observe(&mut self, db: &Database, captured: &Captured) -> Result<bool, String> {
+    /// copied; how it stored it, if it did.
+    pub fn observe(
+        &mut self,
+        db: &Database,
+        captured: &Captured,
+    ) -> Result<Option<Stored>, String> {
         let hash = captured.hash();
         if hash == self.last_hash {
-            return Ok(false);
+            return Ok(None);
         }
         let is_secret = is_recent_secret(&hash);
         // Seen either way: a failed store is not retried on every poll.
         self.last_hash = hash.clone();
         if is_secret {
-            return Ok(false);
+            return Ok(None);
         }
-        captured.store(db, &hash).map(|()| true)
+        captured.store(db, &hash).map(Some)
+    }
+
+    /// The hash of what was observed last.
+    pub fn last_hash(&self) -> &str {
+        &self.last_hash
     }
 }
 
@@ -151,10 +174,11 @@ pub fn hash_bytes(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-/// The image as a losslessly optimized PNG.
+/// The image as a PNG, encoded quickly: what reads the clipboard waits
+/// for it. [`optimize_stored`] makes it small later.
 pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
     let mut png = Vec::new();
-    PngEncoder::new(&mut png)
+    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive)
         .write_image(
             image.as_raw(),
             image.width(),
@@ -162,7 +186,23 @@ pub fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
             ExtendedColorType::Rgba8,
         )
         .map_err(|e| e.to_string())?;
-    Ok(oxipng::optimize_from_memory(&png, &oxipng::Options::default()).unwrap_or(png))
+    Ok(png)
+}
+
+/// Encodes the stored image with `hash` smaller, losslessly; whether it
+/// got smaller. Seconds of work for a screenshot: for a thread with
+/// nothing else to do.
+pub fn optimize_stored(db: &Database, hash: &str) -> Result<bool, String> {
+    let Some((id, png)) = db.image_by_hash(hash).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    let smaller = oxipng::optimize_from_memory(&png, &oxipng::Options::default())
+        .map_err(|e| e.to_string())?;
+    if smaller.len() >= png.len() {
+        return Ok(false);
+    }
+    db.set_image_data(id, &smaller).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// The image scaled down, keeping its proportions, until it just covers
@@ -337,6 +377,48 @@ mod tests {
     }
 
     #[test]
+    fn an_image_already_stored_is_not_encoded_again() {
+        let db = Database::in_memory().unwrap();
+        let image = Captured::Image(checker(4, 4));
+        let hash = image.hash();
+        // Stored before, as it is told from this by its bytes.
+        db.insert_image_at(b"stored", b"thumb", &hash, "2026-01-01T00:00:00.000")
+            .unwrap();
+        image.store(&db, &hash).unwrap();
+        let id = db.today_items().unwrap()[0].id;
+        assert_eq!(
+            db.item_content(id).unwrap(),
+            Some(ItemContent::Image(b"stored".to_vec()))
+        );
+    }
+
+    #[test]
+    fn stored_images_are_optimized_later_without_changing_a_pixel() {
+        let db = Database::in_memory().unwrap();
+        // Two colors only: much to gain over a truecolor PNG.
+        let image = Captured::Image(stripes(400, 300, 8));
+        let hash = image.hash();
+        image.store(&db, &hash).unwrap();
+        let id = db.today_items().unwrap()[0].id;
+        let stored = |db: &Database| match db.item_content(id).unwrap() {
+            Some(ItemContent::Image(png)) => png,
+            other => panic!("expected an image, got {other:?}"),
+        };
+        let before = stored(&db);
+        assert!(optimize_stored(&db, &hash).unwrap());
+        let after = stored(&db);
+        assert!(after.len() < before.len());
+        assert_eq!(
+            image::load_from_memory(&after).unwrap().to_rgba8(),
+            stripes(400, 300, 8)
+        );
+        // Nothing more to gain, and nothing to do for what is gone.
+        assert!(!optimize_stored(&db, &hash).unwrap());
+        db.delete_item(id).unwrap();
+        assert!(!optimize_stored(&db, &hash).unwrap());
+    }
+
+    #[test]
     fn our_own_secret_copies_are_skipped() {
         let _slot = secret_slot();
         remember_secret("s3cret");
@@ -349,10 +431,12 @@ mod tests {
         let db = Database::in_memory().unwrap();
         let mut recorder = Recorder::new();
         let first = Captured::Text("recorder-first".into());
-        assert!(recorder.observe(&db, &first).unwrap());
-        assert!(!recorder.observe(&db, &first).unwrap());
+        assert_eq!(recorder.observe(&db, &first), Ok(Some(Stored::Added)));
+        assert_eq!(recorder.observe(&db, &first), Ok(None));
         let second = Captured::Text("recorder-second".into());
-        assert!(recorder.observe(&db, &second).unwrap());
+        assert_eq!(recorder.observe(&db, &second), Ok(Some(Stored::Added)));
+        // Copied again after something else: back to the front.
+        assert_eq!(recorder.observe(&db, &first), Ok(Some(Stored::Moved)));
         assert_eq!(db.today_items().unwrap().len(), 2);
     }
 
@@ -363,7 +447,7 @@ mod tests {
         let mut recorder = Recorder::new();
         begin_secret_copy("recorder-secret");
         let secret = Captured::Text("recorder-secret".into());
-        assert!(!recorder.observe(&db, &secret).unwrap());
+        assert_eq!(recorder.observe(&db, &secret), Ok(None));
         assert!(db.today_items().unwrap().is_empty());
     }
 

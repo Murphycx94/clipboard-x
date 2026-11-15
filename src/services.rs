@@ -19,6 +19,8 @@ use crate::vault::{self, KdfParams, VaultError, VaultService};
 
 /// The app's id: its data directory's name.
 pub const APP_ID: &str = "com.clipboardx.app";
+/// How long the app runs before it applies the retention again.
+const CLEANUP_INTERVAL_MS: u64 = 60 * 60 * 1000;
 
 /// Overrides the data directory (tests, portable installs).
 pub const DATA_DIR_ENV: &str = "CLIPBOARDX_DATA_DIR";
@@ -54,8 +56,12 @@ pub enum Blur {
 
 pub struct Services {
     db: Arc<Database>,
+    /// Why the database is one in memory, when the one on disk failed.
+    storage_failure: Option<String>,
     data_dir: PathBuf,
     data_version: Arc<AtomicU64>,
+    /// When the retention was last applied (ms since the epoch).
+    cleaned_at_ms: AtomicU64,
     shown: AtomicU64,
     #[cfg_attr(target_os = "android", allow(dead_code))]
     capture_started: AtomicBool,
@@ -119,16 +125,23 @@ fn android_package(cmdline: &[u8]) -> Option<String> {
 
 impl Services {
     /// Services on the database in `dir`, or on one in memory when it
-    /// cannot be opened (logged), so the window still shows.
+    /// cannot be opened, so the window still shows: to say so (see
+    /// [`storage_failure`](Self::storage_failure)), as nothing is kept.
     pub fn open(dir: &Path) -> Services {
         if let Err(e) = std::fs::create_dir_all(dir) {
             log::error!("cannot create {}: {e}", dir.display());
         }
-        let db = Database::open(&dir.join("clipboardx.db")).unwrap_or_else(|e| {
-            log::error!("cannot open the database in {}: {e}", dir.display());
-            Database::in_memory().unwrap_or_else(|e| panic!("cannot open SQLite at all: {e}"))
-        });
-        let services = Services::new(db, dir.to_owned());
+        let (db, failure) = match Database::open(&dir.join("clipboardx.db")) {
+            Ok(db) => (db, None),
+            Err(e) => {
+                log::error!("cannot open the database in {}: {e}", dir.display());
+                let db = Database::in_memory()
+                    .unwrap_or_else(|e| panic!("cannot open SQLite at all: {e}"));
+                (db, Some(e.to_string()))
+            }
+        };
+        let mut services = Services::new(db, dir.to_owned());
+        services.storage_failure = failure;
         services.cleanup_expired();
         services.upgrade_thumbnails();
         services
@@ -171,8 +184,10 @@ impl Services {
         Services {
             vault: VaultService::with_params(db.clone(), keys, params),
             db,
+            storage_failure: None,
             data_dir,
             data_version: Arc::new(AtomicU64::new(0)),
+            cleaned_at_ms: AtomicU64::new(0),
             shown: AtomicU64::new(0),
             capture_started: AtomicBool::new(false),
             stop_capture: Arc::new(AtomicBool::new(false)),
@@ -185,6 +200,13 @@ impl Services {
 
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// Why nothing is kept past this run (the history, the settings, the
+    /// vault): the database could not be opened, and one in memory stands
+    /// in. `None` when all is well.
+    pub fn storage_failure(&self) -> Option<&str> {
+        self.storage_failure.as_deref()
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -388,7 +410,7 @@ impl Services {
             .recorder
             .lock()
             .map_err(|_| "剪贴板记录器不可用".to_owned())?;
-        let stored = recorder.observe(&self.db, captured)?;
+        let stored = recorder.observe(&self.db, captured)?.is_some();
         if stored {
             self.notify_changed();
         }
@@ -446,18 +468,30 @@ impl Services {
 
     /// Removes what the retention setting no longer keeps.
     pub fn cleanup_expired(&self) {
-        let removed = self
-            .db
-            .settings()
-            .and_then(|s| self.db.cleanup_expired(s.retention_days));
-        match removed {
-            Ok(0) => {}
-            Ok(n) => {
-                log::info!("removed {n} expired items");
-                self.notify_changed();
-            }
-            Err(e) => log::error!("cannot remove expired items: {e}"),
+        self.cleaned_at_ms.store(vault::now_ms(), Ordering::Release);
+        remove_expired(&self.db, &self.data_version);
+    }
+
+    /// Applies the retention again when it last was an hour or more before
+    /// `now_ms`: an app left running for weeks keeps to it all the same.
+    /// On a thread of its own, which it gives when it started one.
+    pub fn cleanup_when_due(&self, now_ms: u64) -> Option<std::thread::JoinHandle<()>> {
+        let cleaned_at = self.cleaned_at_ms.load(Ordering::Acquire);
+        // Either way: a clock set back does not put it off.
+        if now_ms.abs_diff(cleaned_at) < CLEANUP_INTERVAL_MS {
+            return None;
         }
+        // One of the callers that find it due.
+        self.cleaned_at_ms
+            .compare_exchange(cleaned_at, now_ms, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let db = self.db.clone();
+        let version = self.data_version.clone();
+        std::thread::Builder::new()
+            .name("retention".into())
+            .spawn(move || remove_expired(&db, &version))
+            .map_err(|e| log::error!("cannot start removing expired items: {e}"))
+            .ok()
     }
 
     /// Sends the favorites to Telegram on a thread of its own, when a bot
@@ -507,6 +541,22 @@ impl Drop for SystemPrompt<'_> {
         if let Some(host) = self.services.host.get() {
             host.take_keyboard();
         }
+    }
+}
+
+/// Removes what the retention setting no longer keeps from `db`, moving
+/// `version` when something went.
+fn remove_expired(db: &Database, version: &AtomicU64) {
+    let removed = db
+        .settings()
+        .and_then(|s| db.cleanup_expired(s.retention_days));
+    match removed {
+        Ok(0) => {}
+        Ok(n) => {
+            log::info!("removed {n} expired items");
+            version.fetch_add(1, Ordering::AcqRel);
+        }
+        Err(e) => log::error!("cannot remove expired items: {e}"),
     }
 }
 
@@ -784,6 +834,54 @@ mod tests {
         assert_eq!(s.db().archive_groups().unwrap().len(), 1);
         s.set_retention_days(30).unwrap();
         assert!(s.db().archive_groups().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_retention_is_applied_again_as_the_app_keeps_running() {
+        let s = services();
+        let applied = 10 * CLEANUP_INTERVAL_MS;
+        s.cleanup_when_due(applied)
+            .expect("due at first")
+            .join()
+            .unwrap();
+        s.db()
+            .insert_text_at("old", "h", "2020-01-01T00:00:00")
+            .unwrap();
+        // Not again within the hour.
+        assert!(s.cleanup_when_due(applied + 1).is_none());
+        assert!(
+            s.cleanup_when_due(applied + CLEANUP_INTERVAL_MS - 1)
+                .is_none()
+        );
+        assert_eq!(s.db().archive_groups().unwrap().len(), 1);
+        let version = s.data_version();
+        let cleaning = s.cleanup_when_due(applied + CLEANUP_INTERVAL_MS);
+        cleaning.expect("due").join().unwrap();
+        assert!(s.db().archive_groups().unwrap().is_empty());
+        assert_ne!(s.data_version(), version);
+        // Once for that hour.
+        assert!(
+            s.cleanup_when_due(applied + CLEANUP_INTERVAL_MS + 1)
+                .is_none()
+        );
+        // A clock set back does not put it off until it catches up.
+        s.cleanup_when_due(applied - CLEANUP_INTERVAL_MS)
+            .expect("due")
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_database_that_cannot_be_opened_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Services::open(dir.path()).storage_failure(), None);
+        // Not a file SQLite can open.
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::create_dir(broken.path().join("clipboardx.db")).unwrap();
+        let s = Services::open(broken.path());
+        assert!(s.storage_failure().is_some());
+        // The window still shows, on nothing kept.
+        assert!(s.db().today_items().unwrap().is_empty());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::XNonce;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -121,13 +121,26 @@ pub fn derive_key_keyed(
     let costs =
         Params::new(params.m, params.t, params.p, Some(KEY_LEN)).map_err(|_| CryptoError::Kdf)?;
     let mut out = Zeroizing::new([0_u8; KEY_LEN]);
+    // Argon2's working memory, ours so that it is wiped: by itself the
+    // crate frees it as it is, megabytes derived from the password.
+    let mut memory = Zeroizing::new(Vec::new());
+    // Refused rather than fatal where there is not that much (a phone).
+    memory
+        .try_reserve_exact(costs.block_count())
+        .map_err(|_| CryptoError::Kdf)?;
+    memory.resize(costs.block_count(), Block::default());
     let argon = match secret {
         Some(secret) => Argon2::new_with_secret(secret, Algorithm::Argon2id, Version::V0x13, costs)
             .map_err(|_| CryptoError::Kdf)?,
         None => Argon2::new(Algorithm::Argon2id, Version::V0x13, costs),
     };
     argon
-        .hash_password_into(password.as_bytes(), salt, out.as_mut())
+        .hash_password_into_with_memory(
+            password.as_bytes(),
+            salt,
+            out.as_mut(),
+            memory.as_mut_slice(),
+        )
         .map_err(|_| CryptoError::Kdf)?;
     Ok(SecretKey(out))
 }
@@ -284,6 +297,28 @@ mod tests {
             unwrap_key(&kek2, &rewrapped).unwrap().as_bytes(),
             dek.as_bytes()
         );
+    }
+
+    #[test]
+    fn keys_are_what_argon2_derives_by_itself() {
+        // The working memory is ours (to wipe it): the key must not depend
+        // on that, or no vault made before opens.
+        let costs = Params::new(P.m, P.t, P.p, Some(KEY_LEN)).unwrap();
+        let mut plain = [0_u8; KEY_LEN];
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, costs.clone())
+            .hash_password_into(b"correct horse", b"0123456789abcdef", &mut plain)
+            .unwrap();
+        let key = derive_key("correct horse", b"0123456789abcdef", P).unwrap();
+        assert_eq!(key.as_bytes(), &plain);
+
+        let mut keyed = [0_u8; KEY_LEN];
+        Argon2::new_with_secret(b"secret key", Algorithm::Argon2id, Version::V0x13, costs)
+            .unwrap()
+            .hash_password_into(b"correct horse", b"0123456789abcdef", &mut keyed)
+            .unwrap();
+        let key =
+            derive_key_keyed("correct horse", b"0123456789abcdef", P, Some(b"secret key")).unwrap();
+        assert_eq!(key.as_bytes(), &keyed);
     }
 
     #[test]

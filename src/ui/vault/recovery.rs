@@ -137,6 +137,9 @@ pub(super) const CHECK_FAILED: &str = "填写的字与助记词不一致，请�
 impl AppState {
     /// Creates the vault once the user confirmed the phrase.
     pub fn vault_setup_with_recovery(self, password: String, phrase: RecoveryKey) {
+        if !self.can_keep_a_vault() {
+            return;
+        }
         let password = Zeroizing::new(password);
         self.run_vault(
             move || services().vault().setup_with_recovery(&password, &phrase),

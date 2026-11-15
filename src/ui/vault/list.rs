@@ -191,16 +191,18 @@ fn row(state: AppState, item: Memo<Option<EntrySummary>>, index: Memo<usize>) ->
 
 /// The current code and its seconds left; a press copies it.
 fn totp_pill(state: AppState, id: impl Fn() -> String + Copy + 'static) -> impl IntoElement {
-    let code = move || {
+    // Once a second, however many of the texts below read it: each read
+    // of the vault is a query and a decryption.
+    let code = computed(move || {
         state.vault_tick.get();
         services().vault().totp_code(&id()).ok()
-    };
-    let label = move || match code() {
+    });
+    let label = move || match code.get() {
         Some(c) if c.code.len() == 6 => format!("{} {}", &c.code[..3], &c.code[3..]),
         Some(c) => c.code,
         None => "------".to_owned(),
     };
-    let seconds = move || code().map_or(0, |c| c.remaining);
+    let seconds = move || code.with(|c| c.as_ref().map_or(0, |c| c.remaining));
     view().tooltip(hint("复制验证码")).child(
         button()
             .on_press(move || state.vault_copy(&id(), Field::Totp))

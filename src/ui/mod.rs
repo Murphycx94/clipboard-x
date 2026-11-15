@@ -56,6 +56,10 @@ pub fn App() -> impl IntoElement {
             }
         })
         .child(header::header(state))
+        .child(when(
+            || services().storage_failure().is_some(),
+            widgets::storage_banner,
+        ))
         .child(
             view()
                 .flex_1()

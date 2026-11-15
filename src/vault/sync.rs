@@ -1194,6 +1194,149 @@ mod tests {
     }
 
     #[test]
+    fn the_password_is_not_changed_over_one_another_device_set() {
+        let (a, b, mut server, _) = pair();
+        a.save(None, entry("a", "1")).unwrap();
+        sync(&a, &mut server).unwrap();
+        sync(&b, &mut server).unwrap();
+        b.change_password(PW, NEW_PW).unwrap();
+        sync(&b, &mut server).unwrap();
+        assert_eq!(
+            sync(&a, &mut server).unwrap_err(),
+            VaultError::HeaderChanged
+        );
+
+        // A still opens with the old password, but must take B's before
+        // setting another: its own would compete with B's for good. With
+        // B's typed as the current one too: A's entries are not under its
+        // key yet.
+        let phrase = RecoveryKey::generate().unwrap();
+        for current in [PW, NEW_PW] {
+            assert_eq!(
+                a.change_password(current, "third pass phrase").unwrap_err(),
+                VaultError::HeaderChanged
+            );
+            assert_eq!(
+                a.set_recovery_phrase(current, &phrase).unwrap_err(),
+                VaultError::HeaderChanged
+            );
+            assert!(a.has_staged_header());
+        }
+        a.lock();
+        a.unlock(NEW_PW, now_ms()).unwrap();
+        sync(&a, &mut server).unwrap();
+        a.change_password(NEW_PW, "third pass phrase").unwrap();
+        sync(&a, &mut server).unwrap();
+        assert_eq!(titles(&a), vec!["a"]);
+    }
+
+    #[test]
+    fn the_new_password_typed_at_any_check_is_taken_keeping_local_edits() {
+        let (a, b, mut server, _) = pair();
+        let id = a.save(None, entry("shared", "keep")).unwrap();
+        sync(&a, &mut server).unwrap();
+        sync(&b, &mut server).unwrap();
+        let local = b.save(None, entry("only on b", "draft")).unwrap();
+        a.change_password(PW, NEW_PW).unwrap();
+        sync(&a, &mut server).unwrap();
+        assert_eq!(
+            sync(&b, &mut server).unwrap_err(),
+            VaultError::HeaderChanged
+        );
+
+        // Not at the prompt for it, but where the master password is asked
+        // again (an export, turning Touch ID on): b, unlocked, moves to the
+        // new key all the same, with what it had not uploaded.
+        b.check_password(NEW_PW).unwrap();
+        assert!(!b.has_staged_header());
+        assert_eq!(b.status(), VaultStatus::Unlocked);
+        sync(&b, &mut server).unwrap();
+        assert_eq!(b.get(&id).unwrap().password, "keep");
+        sync(&a, &mut server).unwrap();
+        assert_eq!(a.get(&local).unwrap().password, "draft");
+    }
+
+    #[test]
+    fn the_key_is_not_changed_before_every_entry_follows_it() {
+        let (a, b, mut server, _) = pair();
+        let id = a.save(None, entry("shared", "keep")).unwrap();
+        sync(&a, &mut server).unwrap();
+        sync(&b, &mut server).unwrap();
+        a.change_password(PW, NEW_PW).unwrap();
+        sync(&a, &mut server).unwrap();
+        assert_eq!(
+            sync(&b, &mut server).unwrap_err(),
+            VaultError::HeaderChanged
+        );
+        b.lock();
+        b.unlock(NEW_PW, now_ms()).unwrap();
+
+        // b's copies are under the old key until it syncs: a new key now
+        // would leave them behind, here and on the server.
+        assert_eq!(
+            b.change_password(NEW_PW, "third pass phrase").unwrap_err(),
+            VaultError::StaleEntries
+        );
+        // They look corrupt meanwhile and are not: deleting one would
+        // delete it everywhere, and a backup would lack them all.
+        assert!(b.list().unwrap()[0].corrupt);
+        assert_eq!(b.delete(&id).unwrap_err(), VaultError::StaleEntries);
+        assert_eq!(
+            b.export(NEW_PW, "backup pass phrase").unwrap_err(),
+            VaultError::StaleEntries
+        );
+        sync(&b, &mut server).unwrap();
+        assert_eq!(
+            b.export(NEW_PW, "backup pass phrase").unwrap().unreadable,
+            0
+        );
+        b.change_password(NEW_PW, "third pass phrase").unwrap();
+        sync(&b, &mut server).unwrap();
+        assert_eq!(
+            sync(&a, &mut server).unwrap_err(),
+            VaultError::HeaderChanged
+        );
+        a.lock();
+        a.unlock("third pass phrase", now_ms()).unwrap();
+        sync(&a, &mut server).unwrap();
+        assert_eq!(a.get(&id).unwrap().password, "keep");
+    }
+
+    #[test]
+    fn a_deletion_that_no_longer_opens_does_not_stop_a_key_change() {
+        let (a, _b, mut server, _) = pair();
+        let gone = a.save(None, entry("gone", "1")).unwrap();
+        let kept = a.save(None, entry("kept", "2")).unwrap();
+        sync(&a, &mut server).unwrap();
+        a.delete(&gone).unwrap();
+        let spoil = |id: &str| {
+            a.db.with_conn(|c| {
+                c.execute(
+                    "UPDATE vault_entries SET ciphertext = zeroblob(40) WHERE id = ?1",
+                    [id],
+                )
+                .unwrap()
+            });
+        };
+        // The deletion's marker, which no list shows and so nobody can
+        // remove: it is made again under the new key.
+        spoil(&gone);
+        a.change_password(PW, NEW_PW).unwrap();
+        sync(&a, &mut server).unwrap();
+        assert_eq!(titles(&a), vec!["kept"]);
+        assert!(server.records[&gone].deleted);
+
+        // An entry that no longer opens does stop it, until it is deleted.
+        spoil(&kept);
+        assert_eq!(
+            a.change_password(NEW_PW, "third pass phrase").unwrap_err(),
+            VaultError::StaleEntries
+        );
+        a.delete(&kept).unwrap();
+        a.change_password(NEW_PW, "third pass phrase").unwrap();
+    }
+
+    #[test]
     fn a_new_device_recovers_with_the_phrase_alone() {
         let (a, _b, mut server, _) = pair();
         a.save(None, entry("kept", "1")).unwrap();

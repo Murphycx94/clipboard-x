@@ -26,12 +26,20 @@ impl AppState {
     pub fn refresh_vault(self) {
         let vault = services().vault();
         let status = vault.status();
+        let was_unlocked = untracked(move || self.vault_status.get()) == VaultStatus::Unlocked;
         self.vault_status.set(status);
         self.refresh_sync();
         if status != VaultStatus::Unlocked {
             self.vault_items.set(Vec::new());
-            if self.dialog.get().is_some_and(DialogKind::is_vault) {
+            let closes = |dialog: &DialogKind| {
+                dialog.is_vault() || (was_unlocked && dialog.closes_on_lock())
+            };
+            if let Some(dialog) = self.dialog.get().filter(closes) {
                 self.dialog.set(None);
+                if dialog == DialogKind::SyncNewPassword {
+                    // Asked again after the next unlock, if still needed.
+                    self.sync_prompted.set(false);
+                }
             }
             return;
         }
@@ -56,7 +64,8 @@ impl AppState {
         // While a vault operation runs it refreshes the page itself when
         // done: switching earlier would show a page that is still busy.
         let busy = untracked(move || self.vault_busy.get());
-        if !busy && vault.status() != untracked(move || self.vault_status.get()) {
+        let status = vault.status();
+        if !busy && status != untracked(move || self.vault_status.get()) {
             self.refresh_vault();
         }
         // Another device changed the master password: ask once.
@@ -64,7 +73,7 @@ impl AppState {
         let prompted = untracked(move || self.sync_prompted.get());
         if staged
             && !prompted
-            && vault.status() == VaultStatus::Unlocked
+            && status == VaultStatus::Unlocked
             && untracked(move || self.dialog.get()).is_none()
         {
             self.sync_prompted.set(true);
@@ -105,11 +114,18 @@ impl AppState {
             return;
         }
         self.vault_busy.set(true);
+        let staged = services().vault().has_staged_header();
         spawn(async move {
             let result = blocking(work)
                 .await
                 .unwrap_or_else(|e| Err(VaultError::Storage(e.to_string())));
             self.vault_busy.set(false);
+            if staged && !services().vault().has_staged_header() {
+                // Another device's new key was taken, wherever its password
+                // was typed: the entries come under it at the next sync,
+                // and look corrupt until then.
+                services().sync_now();
+            }
             match result {
                 Ok(value) => done(value),
                 Err(e) => self.error(e.to_string()),
@@ -330,9 +346,10 @@ impl AppState {
         let (master, password) = (Zeroizing::new(master), Zeroizing::new(password));
         self.run_vault(
             move || services().vault().export(&master, &password),
-            move |text| {
+            move |backup| {
                 self.dialog.set(None);
-                let text = Zeroizing::new(text);
+                let unreadable = backup.unreadable;
+                let text = Zeroizing::new(backup.text);
                 let picked = pick_save_path(
                     SaveDialog::new()
                         .file_name(BACKUP_FILE_NAME)
@@ -342,6 +359,9 @@ impl AppState {
                 spawn(async move {
                     match picked.await {
                         Ok(Some(path)) => match std::fs::write(&path, text.as_bytes()) {
+                            Ok(()) if unreadable > 0 => self.error(format!(
+                                "备份已导出，但有 {unreadable} 个已损坏的条目无法读取，未包含在内"
+                            )),
                             Ok(()) => self.success("备份已导出"),
                             Err(e) => {
                                 log::error!("cannot write the backup: {e}");

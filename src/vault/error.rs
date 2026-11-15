@@ -31,6 +31,10 @@ pub enum VaultError {
     Tampered,
     /// The master password changed on another device.
     HeaderChanged,
+    /// Entries of a syncing vault are not under its current key (not
+    /// fetched again since another device changed it, or corrupt): a new
+    /// key would leave them behind on every device.
+    StaleEntries,
     Sync(String),
     InvalidTotp(String),
     InvalidBackup(String),
@@ -70,6 +74,9 @@ impl fmt::Display for VaultError {
             VaultError::HeaderChanged => {
                 f.write_str("其他设备修改了主密码或助记词，请用当前的主密码解锁")
             }
+            VaultError::StaleEntries => f.write_str(
+                "有条目还不在当前的密钥下：请先完成一次同步；仍显示“已损坏”的条目请删除后再试",
+            ),
             VaultError::Sync(why) => write!(f, "同步失败：{why}"),
             VaultError::NotFound => f.write_str("条目不存在"),
             VaultError::InvalidTotp(why)

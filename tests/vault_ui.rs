@@ -13,6 +13,8 @@ use common::{SLOW, fill_checks, shown_phrase, wait};
 
 const MASTER: &str = "correct horse battery";
 const NEW_MASTER: &str = "a brand new master pass";
+/// The page follows a lock made elsewhere within a few of its ticks.
+const LOCK_FOLLOWED: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn start() -> Headless {
     let mut config = EngineConfig::new(clipboardx::root());
@@ -156,4 +158,17 @@ fn vault_setup_entries_lock_and_unlock() {
         services().vault().status(),
         clipboardx::vault::VaultStatus::Unlocked
     );
+
+    // A lock closes the dialog showing a phrase: it must not stay on screen
+    // for whoever comes by. The page first sees the vault unlocked: the
+    // phrase unlocked it just now behind its back.
+    app.press("label:密码本").unwrap();
+    wait(&mut app, "还没有保存任何账号");
+    app.press("label:设置").unwrap();
+    wait(&mut app, "已设置：忘记主密码时可用它重置");
+    app.press("重新生成").unwrap();
+    wait(&mut app, "我已抄写，下一步");
+    services().vault().lock();
+    app.wait_for_gone("我已抄写，下一步", LOCK_FOLLOWED)
+        .unwrap();
 }

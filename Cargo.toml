@@ -28,11 +28,14 @@ semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-oxipng = { version = "10.2.1", default-features = false, features = ["parallel"] }
+# Without "parallel": it works in the background, on one core.
+oxipng = { version = "10.2.1", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.13.5", features = ["blocking", "json", "multipart"] }
-argon2 = "0.6.0"
-chacha20poly1305 = "0.11.0"
+# zeroize: the cipher wipes its copy of the key when dropped, and Argon2's
+# blocks can be wiped (vault/crypto.rs does, of its working memory).
+argon2 = { version = "0.6.0", features = ["zeroize"] }
+chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
 totp-rs = { version = "6.0.0", features = ["otpauth"] }
 uuid = { version = "1.29.2", features = ["v4"] }
@@ -101,6 +104,10 @@ nsh-engine = "0.5.0"
 nsh-testing = "0.5.0"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros"] }
+
+# Without symbols: about a quarter off the binaries that ship.
+[profile.release]
+strip = true
 
 # Key derivation is unusably slow unoptimized; keep debug builds and tests quick.
 [profile.dev.package.argon2]

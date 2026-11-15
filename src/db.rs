@@ -14,6 +14,11 @@ use crate::model::{
 
 /// Characters of text that lists load.
 const PREVIEW_CHARS: i64 = 200;
+/// The items of today (`?1`, as `YYYY-MM-DD`) and those before, by the
+/// order of the timestamps' text, which is that of time: comparing the
+/// column itself (not `date()` of it) lets the index on it find them.
+const TODAY: &str = "created_at >= ?1";
+const BEFORE_TODAY: &str = "created_at < ?1";
 
 const SCHEMA: &str = "
     PRAGMA journal_mode=WAL;
@@ -165,6 +170,38 @@ impl Database {
         Ok(())
     }
 
+    /// Moves the item with `hash` to now, as copying it again does; whether
+    /// there is one.
+    pub fn touch_item(&self, hash: &str) -> Result<bool> {
+        let moved = self.conn().execute(
+            "UPDATE clipboard_items SET created_at = ?1 WHERE hash = ?2",
+            params![Self::now(), hash],
+        )?;
+        Ok(moved > 0)
+    }
+
+    /// The id and the PNG of the image item with `hash`.
+    pub fn image_by_hash(&self, hash: &str) -> Result<Option<(i64, Vec<u8>)>> {
+        self.conn()
+            .query_row(
+                "SELECT id, image_data FROM clipboard_items
+                 WHERE hash = ?1 AND content_type = 'image' AND image_data IS NOT NULL",
+                params![hash],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+    }
+
+    /// Replaces the PNG of image item `id` (the same pixels, encoded
+    /// smaller).
+    pub fn set_image_data(&self, id: i64, png: &[u8]) -> Result<()> {
+        self.conn().execute(
+            "UPDATE clipboard_items SET image_data = ?1 WHERE id = ?2",
+            params![png, id],
+        )?;
+        Ok(())
+    }
+
     fn row_to_item(row: &Row) -> Result<ClipboardItem> {
         let thumbnail: Option<Vec<u8>> = row.get(3)?;
         Ok(ClipboardItem {
@@ -193,15 +230,14 @@ impl Database {
 
     /// Today's items, newest first.
     pub fn today_items(&self) -> Result<Vec<ClipboardItem>> {
-        self.query_items("date(created_at) = ?1", params![Self::today()])
+        self.query_items(TODAY, params![Self::today()])
     }
 
     /// Items of earlier days, grouped by day, newest first.
     pub fn archive_groups(&self) -> Result<Vec<DateGroup>> {
-        Ok(group_by_date(self.query_items(
-            "date(created_at) < ?1",
-            params![Self::today()],
-        )?))
+        Ok(group_by_date(
+            self.query_items(BEFORE_TODAY, params![Self::today()])?,
+        ))
     }
 
     /// The favorites, newest first.
@@ -455,6 +491,17 @@ impl Database {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_item_copied_again_moves_to_now() {
+        let db = db();
+        assert!(!db.touch_item("h").unwrap());
+        db.insert_text_at("old", "h", "2020-01-01T00:00:00.000")
+            .unwrap();
+        assert!(db.today_items().unwrap().is_empty());
+        assert!(db.touch_item("h").unwrap());
+        assert_eq!(db.today_items().unwrap().len(), 1);
+    }
+
     fn db() -> Database {
         Database::in_memory().expect("in-memory db")
     }
@@ -492,6 +539,57 @@ mod tests {
             .map(|i| i.text_preview.clone().unwrap())
             .collect();
         assert_eq!(texts, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn the_day_splits_at_midnight_whatever_the_timestamps_look_like() {
+        let db = db();
+        let today = Database::today();
+        let yesterday = (Local::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        // With milliseconds and, as older versions wrote them, without.
+        db.insert_text_at("first", "h1", &format!("{today}T00:00:00.000"))
+            .unwrap();
+        db.insert_text_at("second", "h2", &format!("{today}T08:00:00"))
+            .unwrap();
+        db.insert_text_at("last", "h3", &format!("{yesterday}T23:59:59.999"))
+            .unwrap();
+        db.insert_text_at("late", "h4", &format!("{yesterday}T23:59:59"))
+            .unwrap();
+        let texts = |items: &[ClipboardItem]| -> Vec<String> {
+            items
+                .iter()
+                .filter_map(|i| i.text_preview.clone())
+                .collect()
+        };
+        assert_eq!(texts(&db.today_items().unwrap()), ["second", "first"]);
+        let archive = db.archive_groups().unwrap();
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive[0].date, yesterday);
+        assert_eq!(texts(&archive[0].items), ["last", "late"]);
+    }
+
+    #[test]
+    fn the_day_queries_use_the_index() {
+        let db = db();
+        let plan = |filter: &str| -> String {
+            db.with_conn(|c| {
+                let sql = format!(
+                    "EXPLAIN QUERY PLAN SELECT id FROM clipboard_items WHERE {filter}
+                     ORDER BY created_at DESC, id DESC"
+                );
+                let mut stmt = c.prepare(&sql).unwrap();
+                let rows = stmt
+                    .query_map(["2026-01-01"], |r| r.get::<_, String>(3))
+                    .unwrap();
+                rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("; ")
+            })
+        };
+        for filter in [TODAY, BEFORE_TODAY] {
+            let plan = plan(filter);
+            assert!(plan.contains("idx_created_at"), "{filter}: {plan}");
+        }
     }
 
     #[test]
