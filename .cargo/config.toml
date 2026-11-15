@@ -1,7 +1,10 @@
 # Windows: the C runtime linked into the executable, so the app runs
-# without the Visual C++ redistributable installed.
+# without the Visual C++ redistributable installed; and the system's
+# libraries loaded from the system directory only (0x800:
+# LOAD_LIBRARY_SEARCH_SYSTEM32), not from a file of their name that
+# happens to lie next to the executable, as in a downloads folder.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]
 
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]

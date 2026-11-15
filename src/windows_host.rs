@@ -16,8 +16,8 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use global_hotkey::hotkey::HotKey;
@@ -28,7 +28,8 @@ use nsh_platform_windows::{App, AppOptions, AppView, Limits};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0,
+    WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
@@ -37,24 +38,30 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
 use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
+use windows::Win32::System::Power::{
+    HPOWERNOTIFY, RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification,
+};
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{
+    CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
     SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    ASFW_ANY, AllowSetForegroundWindow, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HWND_BROADCAST, HWND_TOPMOST,
-    IsWindow, IsWindowVisible, MSG, PBT_APMSUSPEND, PostMessageW, RegisterWindowMessageW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_NOSIZE, SetForegroundWindow, SetWindowDisplayAffinity, SetWindowPos,
-    ShowWindow, TranslateMessage, WA_INACTIVE, WDA_EXCLUDEFROMCAPTURE, WDA_MONITOR, WDA_NONE,
-    WM_ACTIVATE, WM_APP, WM_CLOSE, WM_ENDSESSION, WM_NCDESTROY, WM_POWERBROADCAST,
-    WM_WTSSESSION_CHANGE, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK,
-    WTS_SESSION_LOGOFF,
+    ASFW_ANY, AllowSetForegroundWindow, DEVICE_NOTIFY_WINDOW_HANDLE, DestroyWindow,
+    DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+    HWND_BROADCAST, HWND_TOPMOST, IsWindow, IsWindowVisible, MSG, PBT_APMSUSPEND, PostMessageW,
+    RegisterWindowMessageW, SC_KEYMENU, SW_HIDE, SWP_NOACTIVATE, SetForegroundWindow,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, WA_INACTIVE,
+    WDA_EXCLUDEFROMCAPTURE, WDA_MONITOR, WDA_NONE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_ENDSESSION,
+    WM_NCDESTROY, WM_POWERBROADCAST, WM_SYSCOMMAND, WM_WTSSESSION_CHANGE, WTS_CONSOLE_DISCONNECT,
+    WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
 };
 use windows::core::{PCWSTR, w};
 
@@ -72,8 +79,11 @@ const UI_STACK_BYTES: usize = 8 << 20;
 /// The tray icon's size in pixels: sharp up to 200% scaling.
 const TRAY_ICON_SIZE: u32 = 32;
 /// A tray click this soon after the panel hid by losing the keyboard (to
-/// that very click) or after another click (a double click) changes nothing.
+/// that very click) or after another click (a double click) changes
+/// nothing: at least this long, and the system's double-click time.
 const TRAY_SETTLE: Duration = Duration::from_millis(400);
+/// How long the UI waits for the host's thread to register a shortcut.
+const HOTKEY_ANSWER: Duration = Duration::from_secs(2);
 
 /// Wakes the host's thread to run the queued calls. NSH keeps the first
 /// messages after `WM_APP` for itself on this window.
@@ -85,6 +95,9 @@ const SUBCLASS_ID: usize = 0xC11B;
 const INSTANCE_MUTEX: PCWSTR = w!("Local\\com.clipboardx.app.instance");
 /// What a second launch broadcasts: the running instance shows its panel.
 const SHOW_MESSAGE_NAME: PCWSTR = w!("com.clipboardx.app.show");
+/// What a second launch also sets, for a running instance that is still
+/// starting and has no window to hear the broadcast yet.
+const SHOW_REQUEST_EVENT: PCWSTR = w!("Local\\com.clipboardx.app.show-requested");
 
 const APP_ICON: &[u8] = include_bytes!("../assets/icon.png");
 
@@ -92,6 +105,10 @@ const APP_ICON: &[u8] = include_bytes!("../assets/icon.png");
 static PANEL: AtomicIsize = AtomicIsize::new(0);
 /// The id of [`SHOW_MESSAGE_NAME`] once registered.
 static SHOW_MESSAGE: AtomicU32 = AtomicU32::new(0);
+/// This instance's handle of [`SHOW_REQUEST_EVENT`]; 0 for none.
+static SHOW_REQUEST: AtomicIsize = AtomicIsize::new(0);
+/// The registration for the system's suspend notices; 0 for none.
+static SUSPEND_NOTICES: AtomicIsize = AtomicIsize::new(0);
 
 type Call = Box<dyn FnOnce(&Host) + Send>;
 
@@ -178,10 +195,21 @@ impl WindowHost for WindowsHost {
         with_host(Host::hide);
     }
 
+    /// Waits for the system's answer: it refuses a combination another
+    /// program has, and a refused shortcut must be neither saved nor
+    /// reported as set. Only the host's thread can ask (the shortcut
+    /// belongs to a window of that thread).
     fn set_hotkey(&self, hotkey: &str) -> Result<(), String> {
         let parsed = clipboardx::hotkey::parse(hotkey)?;
-        with_host(move |host| host.register_hotkey(parsed));
-        Ok(())
+        let (answer, answered) = mpsc::channel();
+        with_host(move |host| {
+            let _ = answer.send(host.register_hotkey(parsed));
+        });
+        // A call that was dropped (no panel, a host that is quitting)
+        // hangs up instead of answering.
+        answered
+            .recv_timeout(HOTKEY_ANSWER)
+            .unwrap_or_else(|_| Err("无法注册快捷键，请重试".to_owned()))
     }
 
     fn set_hidden_from_capture(&self, hidden: bool) {
@@ -204,6 +232,22 @@ fn placement(work: RECT, dpi: u32, size: (i32, i32)) -> (i32, i32, i32, i32) {
     let x = work.right - width - pixels(EDGE_MARGIN);
     let y = work.top + ((work.bottom - work.top - height) / 2).max(0);
     (x, y, width, height)
+}
+
+/// How long after a click or a hide by blur a tray click changes nothing.
+fn tray_settle() -> Duration {
+    // SAFETY: no arguments.
+    let double_click = unsafe { GetDoubleClickTime() };
+    Duration::from_millis(u64::from(double_click)).max(TRAY_SETTLE)
+}
+
+/// Whether the launch that held [`SHOW_REQUEST_EVENT`] first was asked to
+/// show its panel while it had no window yet.
+fn show_was_requested() -> bool {
+    let request = SHOW_REQUEST.load(Ordering::Acquire);
+    // SAFETY: the event this process created and keeps; not waited for.
+    request != 0
+        && unsafe { WaitForSingleObject(HANDLE(request as *mut c_void), 0) } == WAIT_OBJECT_0
 }
 
 /// Whether `window` belongs to this process: a dialog of ours, the tray's
@@ -255,12 +299,18 @@ impl Host {
         }
     }
 
-    fn show(&self) {
+    /// Remembers the window that has the keyboard, before the panel takes
+    /// it: the one to give it back to.
+    fn remember_foreground(&self) {
         // SAFETY: no arguments.
         let foreground = unsafe { GetForegroundWindow() };
         if foreground != self.hwnd && !is_ours(foreground) {
             self.previous.set(foreground);
         }
+    }
+
+    fn show(&self) {
+        self.remember_foreground();
         self.round_corners();
         self.move_to_mouse_monitor();
         // Paints before it shows, and takes the taskbar button away again.
@@ -285,6 +335,9 @@ impl Host {
         } else if self.has_keyboard() {
             self.hide();
         } else {
+            // Shown without the keyboard (it stays up when it loses it):
+            // the user is in another window now.
+            self.remember_foreground();
             self.take_keyboard();
         }
     }
@@ -298,7 +351,7 @@ impl Host {
         let settling = self
             .settled
             .get()
-            .is_some_and(|at| now.duration_since(at) < TRAY_SETTLE);
+            .is_some_and(|at| now.duration_since(at) < tray_settle());
         self.settled.set(Some(now));
         if settling {
             return;
@@ -307,6 +360,9 @@ impl Host {
             self.hide();
         } else {
             self.show();
+            // The click made the taskbar the foreground window: not the
+            // one to give the keyboard back to. The system picks.
+            self.previous.set(HWND::default());
         }
     }
 
@@ -370,36 +426,31 @@ impl Host {
             dpi = BASE_DPI;
         }
         let (x, y, width, height) = placement(info.rcWork, dpi, self.size);
-        // Moved first: on a monitor of another scale the system resizes the
-        // window by the ratio of the scales, from the size it has then.
-        // SAFETY: our own window, on its thread.
-        unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                0,
-                0,
-                SWP_NOACTIVATE | SWP_NOSIZE,
-            );
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                width,
-                height,
-                SWP_NOACTIVATE,
-            );
+        // Twice: arriving on a monitor of another scale, the system has the
+        // window resized by the ratio of the scales, from the size it was
+        // just given. After the first call the window is wholly on the
+        // monitor and at its scale; the second only sets the size right.
+        for _ in 0..2 {
+            // SAFETY: our own window, on its thread.
+            let _ = unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOPMOST),
+                    x,
+                    y,
+                    width,
+                    height,
+                    SWP_NOACTIVATE,
+                )
+            };
         }
     }
 
     /// Registers `hotkey` in place of the current one; keeps the current
-    /// one when the system refuses it.
-    fn register_hotkey(&self, hotkey: HotKey) {
+    /// one when the system refuses it, and says why.
+    fn register_hotkey(&self, hotkey: HotKey) -> Result<(), String> {
         let Some(manager) = self.hotkeys.as_ref() else {
-            return;
+            return Err("全局快捷键不可用".to_owned());
         };
         let old = self.hotkey.take();
         if let Some(old) = old
@@ -411,6 +462,7 @@ impl Host {
             Ok(()) => {
                 log::info!("shortcut registered: {hotkey}");
                 self.hotkey.set(Some(hotkey));
+                Ok(())
             }
             Err(e) => {
                 log::error!("cannot register the shortcut {hotkey}: {e}");
@@ -419,6 +471,12 @@ impl Host {
                 {
                     self.hotkey.set(Some(old));
                 }
+                Err(match e {
+                    global_hotkey::Error::AlreadyRegistered(_) => {
+                        "该快捷键已被其他程序或系统占用".to_owned()
+                    }
+                    other => format!("无法注册快捷键：{other}"),
+                })
             }
         }
     }
@@ -452,6 +510,14 @@ unsafe extern "system" fn panel_proc(
         WM_CLOSE => {
             host_now(Host::hide);
             return LRESULT(0);
+        }
+        // Alt alone, or Alt+Space, would start the window's menu: the
+        // panel shows none, and the menu would take the keys typed next
+        // (the default shortcut has Alt in it).
+        WM_SYSCOMMAND => {
+            if (wparam.0 & 0xFFF0) as u32 == SC_KEYMENU {
+                return LRESULT(0);
+            }
         }
         WM_ACTIVATE => {
             let state = (wparam.0 & 0xFFFF) as u32;
@@ -491,8 +557,13 @@ unsafe extern "system" fn panel_proc(
         }
         WM_NCDESTROY => {
             PANEL.store(0, Ordering::Release);
-            // SAFETY: the window and the subclass this function was set as.
+            let suspend_notices = SUSPEND_NOTICES.swap(0, Ordering::AcqRel);
+            // SAFETY: the window, the registrations made for it and the
+            // subclass this function was set as.
             unsafe {
+                if suspend_notices != 0 {
+                    let _ = UnregisterSuspendResumeNotification(HPOWERNOTIFY(suspend_notices));
+                }
                 let _ = WTSUnRegisterSessionNotification(hwnd);
                 let _ = RemoveWindowSubclass(hwnd, Some(panel_proc), SUBCLASS_ID);
             }
@@ -612,15 +683,26 @@ pub fn hand_over_to_running_instance() -> bool {
     // whether the mutex was there already.
     let last_error = unsafe { GetLastError() };
     let already = created.is_ok() && last_error == ERROR_ALREADY_EXISTS;
+    // SAFETY: a named event (reset by hand, not set), the same one for
+    // every launch; the first launch keeps its handle, so it lasts.
+    let request = unsafe { CreateEventW(None, true, false, SHOW_REQUEST_EVENT) };
     if already {
-        // SAFETY: a registered message with no data, to every top-level
-        // window; only the running instance knows it.
+        // SAFETY: the event just opened, and a registered message with no
+        // data, to every top-level window; only the running instance
+        // knows it.
         unsafe {
+            // For a running instance without a window yet: it looks at the
+            // event once its panel is ready.
+            if let Ok(request) = request {
+                let _ = SetEvent(request);
+            }
             let show = RegisterWindowMessageW(SHOW_MESSAGE_NAME);
             // The running instance may come forward on this launch's behalf.
             let _ = AllowSetForegroundWindow(ASFW_ANY);
             let _ = PostMessageW(Some(HWND_BROADCAST), show, WPARAM(0), LPARAM(0));
         }
+    } else if let Ok(request) = request {
+        SHOW_REQUEST.store(request.0 as isize, Ordering::Release);
     }
     already
 }
@@ -684,6 +766,12 @@ fn run_ui(size: (i32, i32)) -> ExitCode {
         if let Err(e) = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) {
             log::error!("cannot hear about the session locking: {e}");
         }
+        // Asked for: a machine that sleeps by Modern Standby tells only
+        // the windows that did.
+        match RegisterSuspendResumeNotification(HANDLE(hwnd.0), DEVICE_NOTIFY_WINDOW_HANDLE) {
+            Ok(notices) => SUSPEND_NOTICES.store(notices.0, Ordering::Release),
+            Err(e) => log::error!("cannot hear about the system suspending: {e}"),
+        }
     }
     PANEL.store(hwnd.0 as isize, Ordering::Release);
     clipboardx::vault::windows_store::set_prompt_owner(hwnd.0 as isize);
@@ -722,10 +810,13 @@ fn run_ui(size: (i32, i32)) -> ExitCode {
         .map(|s| s.hotkey)
         .unwrap_or_else(|_| clipboardx::model::DEFAULT_HOTKEY.to_owned());
     host_now(|host| match clipboardx::hotkey::parse(&hotkey) {
-        Ok(parsed) => host.register_hotkey(parsed),
+        // Refused (another program took it since): logged; the tray icon
+        // still shows the panel, and the settings take another shortcut.
+        Ok(parsed) => drop(host.register_hotkey(parsed)),
         Err(e) => log::error!("saved shortcut {hotkey:?} is invalid: {e}"),
     });
-    if std::env::var_os(SHOW_ON_START_ENV).is_some() {
+    // A launch that came while this one was starting asked for the panel.
+    if std::env::var_os(SHOW_ON_START_ENV).is_some() || show_was_requested() {
         with_host(Host::show);
     }
 

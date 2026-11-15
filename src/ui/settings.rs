@@ -4,7 +4,9 @@ use nsh_base::{SwitchElement, switch, theme};
 use nsh_core::platform::Os;
 use nsh_core::prelude::*;
 
-use crate::model::{RETENTION_OPTIONS, ThemePreference, VAULT_LOCK_OPTIONS, hotkey_label};
+use crate::model::{
+    DEFAULT_HOTKEY, RETENTION_OPTIONS, ThemePreference, VAULT_LOCK_OPTIONS, hotkey_label,
+};
 use crate::services::services;
 use crate::vault::VaultStatus;
 
@@ -186,7 +188,9 @@ fn vault_section(state: AppState) -> impl IntoElement {
             )
             .into_element(),
         ];
-        if services().vault().touch_id_available() {
+        // Also while it is on though the system can no longer confirm the
+        // user (Windows Hello was removed): so that it can be turned off.
+        if services().vault().touch_id_available() || state.settings.get().vault_touch_id {
             let (title, description) = match os() {
                 Os::Android | Os::Ios => ("指纹/面容解锁", "用指纹或面容代替主密码"),
                 Os::Windows => (
@@ -400,7 +404,7 @@ fn hotkey_row(state: AppState) -> impl IntoElement {
                         .on_submit(move |_: &str| {
                             state.save_hotkey(&draft.get());
                         })
-                        .placeholder("CmdOrCtrl+Shift+V"),
+                        .placeholder(DEFAULT_HOTKEY),
                 )
                 .child(
                     text_button("保存", Tone::Primary, move || {

@@ -9,6 +9,7 @@
 //! user's consent, not a lock on the key.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Mutex, mpsc};
@@ -62,12 +63,20 @@ impl WindowsKeyStore {
     }
 }
 
-/// Writes `bytes` next to `path` and moves them over it: a crash leaves the
-/// old file or the new one.
+/// Writes `bytes` next to `path` and moves them over it: a crash, or the
+/// power going, leaves the old file or the new one. Flushed to the disk
+/// before the move: the move alone is journaled, the bytes are not.
 fn write_replacing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let partial = path.with_extension("partial");
-    fs::write(&partial, bytes)?;
-    fs::rename(&partial, path)
+    let written = fs::File::create(&partial).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    });
+    let moved = written.and_then(|()| fs::rename(&partial, path));
+    if moved.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    moved
 }
 
 impl KeyStore for WindowsKeyStore {
@@ -82,11 +91,33 @@ impl KeyStore for WindowsKeyStore {
             .map_err(|e| format!("无法保存密钥：{e}"))
     }
 
+    /// Any item, without asking the user. A copy of the data key the
+    /// system no longer opens (the account's password was reset, the file
+    /// came from elsewhere) is removed: it opens nothing and must not
+    /// stay behind once quick unlocking is reported off. The secret key
+    /// and the device token stay for the system to open another time.
     fn get(&self, item: KeyItem) -> Option<Zeroizing<Vec<u8>>> {
-        let sealed = fs::read(self.path(item)).ok()?;
+        let sealed = fs::read(self.path(item))
+            .inspect_err(|e| {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    log::error!("cannot read {item:?}: {e}");
+                }
+            })
+            .ok()?;
         unprotect(&sealed)
-            .inspect_err(|e| log::error!("cannot open {item:?}: {e}"))
+            .inspect_err(|e| {
+                log::error!("cannot open {item:?}: {e}");
+                if item == KeyItem::DataKey {
+                    self.delete(item);
+                }
+            })
             .ok()
+    }
+
+    /// Whether its file is there, opened or not: a file that cannot be
+    /// read right now is still an item.
+    fn contains(&self, item: KeyItem) -> bool {
+        self.path(item).exists()
     }
 
     fn get_with_auth(&self, item: KeyItem, reason: &str) -> Result<Zeroizing<Vec<u8>>, String> {
@@ -325,13 +356,41 @@ mod tests {
     }
 
     #[test]
-    fn a_file_nobody_sealed_is_no_item() {
+    fn a_secret_key_the_system_cannot_open_is_kept_for_another_time() {
         let dir = tempfile::tempdir().unwrap();
         let store = WindowsKeyStore::new(dir.path());
         fs::write(dir.path().join("secret-key.sealed"), b"garbage").unwrap();
 
         assert!(store.get(KeyItem::SecretKey).is_none());
-        assert!(!store.contains(KeyItem::SecretKey));
+
+        assert!(store.contains(KeyItem::SecretKey));
+    }
+
+    #[test]
+    fn a_data_key_copy_the_system_cannot_open_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WindowsKeyStore::new(dir.path());
+        fs::write(dir.path().join("data-key.sealed"), b"garbage").unwrap();
+
+        assert!(store.get(KeyItem::DataKey).is_none());
+
+        assert!(!store.contains(KeyItem::DataKey));
+        assert!(!dir.path().join("data-key.sealed").exists());
+    }
+
+    #[test]
+    fn replacing_an_item_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WindowsKeyStore::new(dir.path());
+        store.put(KeyItem::SecretKey, b"old").unwrap();
+        store.put(KeyItem::SecretKey, b"new").unwrap();
+
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+
+        assert_eq!(names, ["secret-key.sealed"]);
     }
 
     #[test]

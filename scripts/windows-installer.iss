@@ -52,6 +52,8 @@ Name: "{autoprograms}\ClipboardX"; Filename: "{app}\ClipboardX.exe"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ClipboardX"; ValueData: """{app}\ClipboardX.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+; Unticked on a later install: the entry an earlier one wrote goes.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "ClipboardX"; Flags: deletevalue; Tasks: not autostart
 
 [Run]
 Filename: "{app}\ClipboardX.exe"; Description: "Start ClipboardX"; Flags: nowait postinstall skipifsilent
