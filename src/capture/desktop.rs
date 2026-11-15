@@ -80,7 +80,11 @@ fn clipboard_is_concealed() -> bool {
     };
     opt_outs.into_iter().any(|id| {
         let mut data = [0xFF_u8; 4];
-        clipboard_win::raw::get(id, &mut data).is_ok_and(|read| is_opt_out(&data[..read.min(4)]))
+        match clipboard_win::raw::get(id, &mut data) {
+            Ok(read) => is_opt_out(&data[..read.min(4)]),
+            // There, and not readable: a secret, to be safe.
+            Err(_) => true,
+        }
     })
 }
 
@@ -207,6 +211,11 @@ pub fn spawn_monitor(
                 let Some(captured) = read(&mut clipboard) else {
                     continue;
                 };
+                // Changed while it was read: what was read may not be what
+                // was checked for a secret. The next round reads it again.
+                if change_count() != count {
+                    continue;
+                }
                 // Read whole: not again until the clipboard changes.
                 seen = count;
                 match recorder.observe(&db, &captured) {
