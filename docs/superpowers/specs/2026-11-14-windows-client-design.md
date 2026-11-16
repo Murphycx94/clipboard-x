@@ -167,3 +167,5 @@ v0.4.0 发布前的检查（发布流程、已有用户升级、审查后的修�
 - **高缩放屏在左、低缩放屏在右且更高的排列**（例如 300% 的笔记本屏左边接一台 100% 的竖屏）：跨屏唤出时第一次 `SetWindowPos` 后窗口会被系统临时放大到超出目标屏，其后的行为无法从源码判断。手测第 17 项时加测这种排列；有问题就在 `panel_proc` 里拦截 `WM_DPICHANGED`，用计算好的矩形覆盖系统建议的矩形。
 - **`msftedit.dll`**：`/DEPENDENTLOADFLAG:0x800` 只管导入表。NSH 在第一次需要文本编辑器时用 `LoadLibraryW("msftedit.dll")` 按名字加载，仍会先找应用所在目录。要完全覆盖，可在 `main` 一开始调用 `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)`，先在真机上试。
 - ~~CI 的标签检查在查询失败时当作"未发布"~~：已在 0.4.1 修复，查询失败时 `version` 任务失败，不再发布。
+- **剪贴板打不开时的敏感检查**（0.4.1 合并 `read_if_changed` 后）：内容带非零的 `CanIncludeInClipboardHistory` / `CanUploadToCloudClipboard`，而检查那一刻剪贴板被其他程序占着，会按敏感处理并记为"已看过"，这条复制不再重读、不进历史（以前下一轮会重试）。只会漏记，不会泄露。修法：让检查区分"打不开"和"是敏感内容"，前者让 `read()` 返回 `ClipboardOccupied` 以便下一轮重试。
+- **安卓（非 Windows，0.4.0 起就有）**：改主密码等调用 `rekey` 时，`DeviceStore::get(DataKey)` 恒为空，指纹解锁用的密钥副本既不更新也不删除，之后每次指纹解锁都报"快捷解锁的密钥已失效"且开关不会自动关闭。修法：`rekey` 里 `get` 为空但 `contains` 为真时删除副本。
