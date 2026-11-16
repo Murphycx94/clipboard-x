@@ -1,6 +1,6 @@
 # ClipboardX
 
-一款剪贴板历史管理工具（macOS 桌面版与安卓版）：自动记录复制过的文本与图片，用全局快捷键随时唤出，支持收藏、备注、历史归档与 Telegram 同步，并带一个可在设备间同步的加密密码本。
+一款剪贴板历史管理工具（macOS、Windows 桌面版与安卓版）：自动记录复制过的文本与图片，用全局快捷键随时唤出，支持收藏、备注、历史归档与 Telegram 同步，并带一个可在设备间同步的加密密码本。
 
 用 [Native Shell (NSH)](https://nsh.dev) 以纯 Rust 写成（最初是 Tauri + React，已重写）：界面是 NSH 组件（macOS 上由 AppKit 原生绘制），没有 WebView、Node 与前端构建链。
 
