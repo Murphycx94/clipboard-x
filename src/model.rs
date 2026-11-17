@@ -221,6 +221,53 @@ pub fn group_by_date(items: Vec<ClipboardItem>) -> Vec<DateGroup> {
     groups
 }
 
+/// A row of the archive's one list, pointing into its groups (no copy of
+/// the items): a day's header, or an item of a day that is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveRow {
+    /// The header of `groups[group]`.
+    Day { group: usize },
+    /// `groups[group].items[index]`.
+    Item { group: usize, index: usize },
+}
+
+/// What a row of the archive shows, kept as it moves: a new day archived
+/// at the top shifts the positions, not the keys.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ArchiveKey {
+    Day(String),
+    Item(i64),
+}
+
+/// The archive as one list: each day's header, its items after it when
+/// the day is in `open`.
+pub fn archive_rows(groups: &[DateGroup], open: &[String]) -> Vec<ArchiveRow> {
+    groups
+        .iter()
+        .enumerate()
+        .flat_map(|(group, g)| {
+            let items = if open.contains(&g.date) {
+                g.items.len()
+            } else {
+                0
+            };
+            std::iter::once(ArchiveRow::Day { group })
+                .chain((0..items).map(move |index| ArchiveRow::Item { group, index }))
+        })
+        .collect()
+}
+
+/// The key of `row` in `groups` (`None` for a row they no longer have).
+pub fn archive_row_key(groups: &[DateGroup], row: ArchiveRow) -> Option<ArchiveKey> {
+    match row {
+        ArchiveRow::Day { group } => groups.get(group).map(|g| ArchiveKey::Day(g.date.clone())),
+        ArchiveRow::Item { group, index } => groups
+            .get(group)
+            .and_then(|g| g.items.get(index))
+            .map(|i| ArchiveKey::Item(i.id)),
+    }
+}
+
 /// `abcd****wxyz` for a token, `****` for a short one, `""` for none.
 pub fn mask_token(token: &str) -> String {
     let chars: Vec<char> = token.chars().collect();
@@ -355,6 +402,52 @@ mod tests {
         );
         assert_eq!(groups[1].date, "2026-03-15");
         assert!(group_by_date(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn archive_rows_list_each_day_and_the_items_of_open_days() {
+        let groups = group_by_date(vec![
+            item(1, ContentType::Text, Some("a"), None, "2026-03-17T12:00:00"),
+            item(2, ContentType::Text, Some("b"), None, "2026-03-17T09:00:00"),
+            item(3, ContentType::Text, Some("c"), None, "2026-03-15T09:00:00"),
+        ]);
+
+        let closed = archive_rows(&groups, &[]);
+        assert_eq!(
+            closed,
+            vec![ArchiveRow::Day { group: 0 }, ArchiveRow::Day { group: 1 }]
+        );
+
+        let open = archive_rows(&groups, &["2026-03-17".to_owned()]);
+        assert_eq!(
+            open,
+            vec![
+                ArchiveRow::Day { group: 0 },
+                ArchiveRow::Item { group: 0, index: 0 },
+                ArchiveRow::Item { group: 0, index: 1 },
+                ArchiveRow::Day { group: 1 },
+            ]
+        );
+        assert!(archive_rows(&[], &["2026-03-17".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn archive_row_keys_follow_the_day_and_the_item_not_the_position() {
+        let groups = group_by_date(vec![
+            item(7, ContentType::Text, Some("a"), None, "2026-03-17T12:00:00"),
+            item(9, ContentType::Text, Some("c"), None, "2026-03-15T09:00:00"),
+        ]);
+        let key = |row| archive_row_key(&groups, row);
+        assert_eq!(
+            key(ArchiveRow::Day { group: 1 }),
+            Some(ArchiveKey::Day("2026-03-15".to_owned()))
+        );
+        assert_eq!(
+            key(ArchiveRow::Item { group: 0, index: 0 }),
+            Some(ArchiveKey::Item(7))
+        );
+        assert_eq!(key(ArchiveRow::Item { group: 0, index: 5 }), None);
+        assert_eq!(key(ArchiveRow::Day { group: 2 }), None);
     }
 
     #[test]
