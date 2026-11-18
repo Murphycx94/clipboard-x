@@ -1,7 +1,7 @@
 {
   "name": "ClipboardX",
   "id": "com.clipboardx.app",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "build": 1,
   "rust": ".",
   "root": "App",
