@@ -14,6 +14,12 @@ use crate::model::{
 
 /// Characters of text that lists load.
 const PREVIEW_CHARS: i64 = 200;
+/// `PRAGMA auto_vacuum` when the pages deleted items leave free go back to
+/// the disk on request ([`Database::reclaim_space`]), not on every delete.
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+/// The bytes the WAL file is cut back to after a checkpoint: without it, it
+/// keeps the size of the largest write ever made (a vacuum's, an image's).
+const WAL_SIZE_LIMIT: i64 = 4 * 1024 * 1024;
 /// The items of today (`?1`, as `YYYY-MM-DD`) and those before, by the
 /// order of the timestamps' text, which is that of time: comparing the
 /// column itself (not `date()` of it) lets the index on it find them.
@@ -80,7 +86,11 @@ impl Database {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // Before any table exists: a new database starts incremental.
+        conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         conn.execute_batch(SCHEMA)?;
+        conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT)?;
+        make_incremental(&conn);
         conn.execute_batch(crate::vault::store::SCHEMA)?;
         crate::vault::store::migrate(&conn)?;
         let defaults = Settings::default();
@@ -113,6 +123,31 @@ impl Database {
         Ok(Database {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Gives the pages that deleted items left free back to the disk; how
+    /// many it gave back.
+    pub fn reclaim_space(&self) -> Result<i64> {
+        let conn = self.conn();
+        let free: i64 = conn.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+        if free == 0 {
+            return Ok(0);
+        }
+        // Stepped to its end: a step may free only part of the pages.
+        let mut vacuum = conn.prepare("PRAGMA incremental_vacuum")?;
+        let mut rows = vacuum.query([])?;
+        while rows.next()?.is_some() {}
+        drop(rows);
+        drop(vacuum);
+        checkpoint(&conn)?;
+        Ok(free)
+    }
+
+    /// The pages deleted items left free, not yet given back.
+    #[cfg(test)]
+    pub(crate) fn free_pages(&self) -> Result<i64> {
+        self.conn()
+            .pragma_query_value(None, "freelist_count", |r| r.get(0))
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -319,6 +354,17 @@ impl Database {
         )
     }
 
+    /// The hash of item `id`; `None` when it is gone.
+    pub fn item_hash(&self, id: i64) -> Result<Option<String>> {
+        self.conn()
+            .query_row(
+                "SELECT hash FROM clipboard_items WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// The ids of every image item.
     pub fn image_ids(&self) -> Result<Vec<i64>> {
         let conn = self.conn();
@@ -487,9 +533,48 @@ impl Database {
     }
 }
 
+/// Makes a database that earlier versions left without auto-vacuum
+/// incremental, which takes a full `VACUUM` (a fraction of a second for a
+/// history with a gigabyte of deleted images): it also hands back all the
+/// space it held free, once. A failure (a full disk) leaves it as it was,
+/// still working: it only keeps its size, and is tried again next start.
+fn make_incremental(conn: &Connection) {
+    let mode = conn.pragma_query_value(None, "auto_vacuum", |r| r.get::<_, i64>(0));
+    match mode {
+        Ok(AUTO_VACUUM_INCREMENTAL) => return,
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("cannot read the database's vacuum mode: {e}");
+            return;
+        }
+    }
+    let started = std::time::Instant::now();
+    match conn.execute_batch("VACUUM").and_then(|()| checkpoint(conn)) {
+        Ok(()) => log::info!("compacted the database in {:?}", started.elapsed()),
+        Err(e) => log::warn!("cannot compact the database: {e}"),
+    }
+}
+
+/// Moves what the WAL holds into the database file, then truncates the
+/// WAL: the file shrinks now, not at some later checkpoint. Readers in the
+/// middle of a read can keep it from finishing, which is no error.
+fn checkpoint(conn: &Connection) -> Result<()> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_item_hash_is_found_by_id() {
+        let db = db();
+        db.insert_text_at("t", "h-text", "2020-01-01T00:00:00.000")
+            .unwrap();
+        let id = db.archive_groups().unwrap()[0].items[0].id;
+        assert_eq!(db.item_hash(id).unwrap().as_deref(), Some("h-text"));
+        assert_eq!(db.item_hash(id + 1).unwrap(), None);
+    }
 
     #[test]
     fn an_item_copied_again_moves_to_now() {
@@ -504,6 +589,65 @@ mod tests {
 
     fn db() -> Database {
         Database::in_memory().expect("in-memory db")
+    }
+
+    fn pragma(conn: &Connection, name: &str) -> i64 {
+        conn.pragma_query_value(None, name, |r| r.get(0)).unwrap()
+    }
+
+    /// An image item `n` with a blob big enough to span many pages.
+    fn insert_big_image(db: &Database, n: u8) {
+        db.insert_image(&vec![n; 512 * 1024], &[n], &format!("big-{n}"))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_database_gives_freed_space_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("clipboardx.db")).unwrap();
+        assert_eq!(pragma(&db.conn(), "auto_vacuum"), AUTO_VACUUM_INCREMENTAL);
+        insert_big_image(&db, 1);
+        insert_big_image(&db, 2);
+        let pages = pragma(&db.conn(), "page_count");
+        assert_eq!(db.clear_history().unwrap(), 2);
+        assert!(pragma(&db.conn(), "freelist_count") > 100);
+        assert!(db.reclaim_space().unwrap() > 100);
+        assert_eq!(pragma(&db.conn(), "freelist_count"), 0);
+        assert!(pragma(&db.conn(), "page_count") < pages / 10);
+        // Nothing left to give back.
+        assert_eq!(db.reclaim_space().unwrap(), 0);
+    }
+
+    #[test]
+    fn an_older_database_is_compacted_and_made_incremental_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clipboardx.db");
+        {
+            // As versions before this one left it: no auto-vacuum, and
+            // the space of deleted items still held.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            assert_eq!(pragma(&conn, "auto_vacuum"), 0);
+            let db = Database {
+                conn: Mutex::new(conn),
+            };
+            insert_big_image(&db, 1);
+            insert_big_image(&db, 2);
+            db.insert_text_at("kept", "kept", "2020-01-01T00:00:00.000")
+                .unwrap();
+            db.delete_item(db.image_ids().unwrap()[0]).unwrap();
+            assert!(pragma(&db.conn(), "freelist_count") > 100);
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(pragma(&db.conn(), "auto_vacuum"), AUTO_VACUUM_INCREMENTAL);
+        assert_eq!(pragma(&db.conn(), "freelist_count"), 0);
+        // The image left (today's) and the text (an earlier day's).
+        assert_eq!(db.today_items().unwrap().len(), 1);
+        assert_eq!(db.archive_groups().unwrap()[0].items.len(), 1);
+        drop(db);
+        // The file itself shrank: the WAL was checkpointed into it.
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(size < 800 * 1024, "{size} bytes");
     }
 
     #[test]

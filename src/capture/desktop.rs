@@ -1,8 +1,9 @@
-//! The desktops' clipboard (`arboard`): polled on a thread of its own.
+//! The desktops' clipboard (`arboard`): polled on a thread of its own. On
+//! macOS items go back on the pasteboard directly, as they are stored.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use arboard::Clipboard;
@@ -199,19 +200,41 @@ fn change_count() -> Option<i64> {
     None
 }
 
+/// The change count of the pasteboard as we last wrote it ourselves
+/// ([`copy_item`]), 0 before: the monitor does not read that back.
+#[cfg(target_os = "macos")]
+static OWN_WRITE_COUNT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+#[cfg(target_os = "macos")]
+fn own_write_count() -> Option<i64> {
+    Some(OWN_WRITE_COUNT.load(Ordering::SeqCst)).filter(|&count| count != 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn own_write_count() -> Option<i64> {
+    None
+}
+
 /// What `read` finds on the clipboard, when its change count (`count`)
 /// moved since `seen`: reading costs a copy of the content (an image
 /// decoded), not to pay at every poll. Nothing either when the count moved
 /// again during the read (the parts read may be of two contents, a secret's
-/// among them) or when the read failed: the next poll reads again. Without
-/// a count, every poll reads.
+/// among them), when the read failed (the next poll reads again) or when
+/// the count is that of our own write (`own`): an item the history put
+/// back is not read back. Without a count, every poll reads.
 fn read_if_changed<E>(
     seen: &mut Option<i64>,
     count: impl Fn() -> Option<i64>,
+    own: impl Fn() -> Option<i64>,
     read: impl FnOnce() -> Result<Option<Captured>, E>,
 ) -> Option<Captured> {
     let before = count();
+    let is_own = || before.is_some() && before == own();
     if before.is_some() && before == *seen {
+        return None;
+    }
+    if is_own() {
+        *seen = before;
         return None;
     }
     let captured = read().ok()?;
@@ -219,6 +242,10 @@ fn read_if_changed<E>(
         return None;
     }
     *seen = before;
+    // Our write cleared the pasteboard at this count, noted during the read.
+    if is_own() {
+        return None;
+    }
     captured
 }
 
@@ -243,9 +270,12 @@ fn spawn_optimizer(db: Arc<Database>) -> Sender<String> {
 }
 
 /// Polls the clipboard on a thread of its own, storing what changes and
-/// calling `on_change` after each store, until `stop` is set.
+/// calling `on_change` after each store, until `stop` is set. `recorder` is
+/// shared with [`copy_item`]'s caller, which marks what the history puts
+/// back as seen.
 pub fn spawn_monitor(
     db: Arc<Database>,
+    recorder: Arc<Mutex<Recorder>>,
     stop: Arc<AtomicBool>,
     on_change: impl Fn() + Send + 'static,
 ) -> thread::JoinHandle<()> {
@@ -259,7 +289,6 @@ pub fn spawn_monitor(
                     return;
                 }
             };
-            let mut recorder = Recorder::new();
             let optimize = spawn_optimizer(db.clone());
             let mut seen = None;
             while !stop.load(Ordering::Relaxed) {
@@ -268,18 +297,30 @@ pub fn spawn_monitor(
                     read(&mut clipboard)
                         .inspect_err(|e| log::debug!("the clipboard was not read: {e}"))
                 };
-                let Some(captured) = read_if_changed(&mut seen, change_count, read) else {
+                let Some(captured) =
+                    read_if_changed(&mut seen, change_count, own_write_count, read)
+                else {
                     continue;
                 };
-                match recorder.observe(&db, &captured) {
-                    Ok(Some(stored)) => {
+                let hash = captured.hash();
+                // Decided under the lock, stored outside it: a copy from the
+                // history does not wait for an image to be encoded. The
+                // recorder holds a hash only, sound after a panic.
+                let admitted = recorder
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .admit(&hash);
+                if !admitted {
+                    continue;
+                }
+                match captured.store(&db, &hash) {
+                    Ok(stored) => {
                         on_change();
                         if stored == Stored::Added && matches!(captured, Captured::Image(_)) {
                             // No optimizer: the image stays as it is.
-                            let _ = optimize.send(recorder.last_hash().to_owned());
+                            let _ = optimize.send(hash);
                         }
                     }
-                    Ok(None) => {}
                     Err(e) => log::error!("cannot store a clipboard item: {e}"),
                 }
             }
@@ -293,11 +334,48 @@ pub fn copy_item(db: &Database, id: i64) -> Result<(), String> {
         .item_content(id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "该条目已不存在".to_owned())?;
+    write(&content)
+}
+
+/// Writes `content` on the pasteboard as it is stored: an image as its
+/// PNG, neither decoded nor made a TIFF (which took long enough, on the UI
+/// thread, to stall the panel). Notes the write's change count first, so
+/// the monitor never reads it back.
+#[cfg(target_os = "macos")]
+fn write(content: &ItemContent) -> Result<(), String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString};
+    use objc2_foundation::{NSData, NSString};
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    // Writing after clearing keeps the count clearing gave.
+    let count = pasteboard.clearContents();
+    OWN_WRITE_COUNT.store(i64::try_from(count).unwrap_or(0), Ordering::SeqCst);
+    // SAFETY: AppKit's pasteboard type constants are immutable statics,
+    // initialized when AppKit loads.
+    let written = unsafe {
+        match content {
+            ItemContent::Text(text) => {
+                pasteboard.setString_forType(&NSString::from_str(text), NSPasteboardTypeString)
+            }
+            ItemContent::Image(png) => {
+                pasteboard.setData_forType(Some(&NSData::with_bytes(png)), NSPasteboardTypePNG)
+            }
+        }
+    };
+    if written {
+        Ok(())
+    } else {
+        Err("无法写入剪贴板".to_owned())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write(content: &ItemContent) -> Result<(), String> {
     let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
     match content {
-        ItemContent::Text(text) => clipboard.set_text(text).map_err(|e| e.to_string()),
+        ItemContent::Text(text) => clipboard.set_text(text.as_str()).map_err(|e| e.to_string()),
         ItemContent::Image(png) => {
-            let rgba = image::load_from_memory(&png)
+            let rgba = image::load_from_memory(png)
                 .map_err(|e| e.to_string())?
                 .to_rgba8();
             clipboard
@@ -333,9 +411,9 @@ mod tests {
     #[test]
     fn a_read_that_failed_is_tried_again() {
         let mut seen = None;
-        assert!(read_if_changed(&mut seen, || Some(3), || Err(())).is_none());
+        assert!(read_if_changed(&mut seen, || Some(3), || None, || Err(())).is_none());
         // The same count: still to read.
-        assert!(read_if_changed(&mut seen, || Some(3), text).is_some());
+        assert!(read_if_changed(&mut seen, || Some(3), || None, text).is_some());
     }
 
     #[test]
@@ -347,11 +425,11 @@ mod tests {
             text()
         };
         let mut seen = None;
-        assert!(read_if_changed(&mut seen, || count.get(), read).is_some());
-        assert!(read_if_changed(&mut seen, || count.get(), read).is_none());
+        assert!(read_if_changed(&mut seen, || count.get(), || None, read).is_some());
+        assert!(read_if_changed(&mut seen, || count.get(), || None, read).is_none());
         assert_eq!(reads.get(), 1);
         count.set(Some(8));
-        assert!(read_if_changed(&mut seen, || count.get(), read).is_some());
+        assert!(read_if_changed(&mut seen, || count.get(), || None, read).is_some());
         assert_eq!(reads.get(), 2);
     }
 
@@ -364,21 +442,55 @@ mod tests {
         let torn = read_if_changed(
             &mut seen,
             || count.get(),
+            || None,
             || {
                 count.set(Some(2));
                 text()
             },
         );
         assert!(torn.is_none());
-        assert!(read_if_changed(&mut seen, || count.get(), text).is_some());
-        assert!(read_if_changed(&mut seen, || count.get(), text).is_none());
+        assert!(read_if_changed(&mut seen, || count.get(), || None, text).is_some());
+        assert!(read_if_changed(&mut seen, || count.get(), || None, text).is_none());
+    }
+
+    #[test]
+    fn our_own_write_is_not_read_back() {
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            text()
+        };
+        let mut seen = Some(4);
+        assert!(read_if_changed(&mut seen, || Some(5), || Some(5), read).is_none());
+        assert_eq!(reads.get(), 0);
+        assert_eq!(seen, Some(5));
+        // What another app copies next is read.
+        assert!(read_if_changed(&mut seen, || Some(6), || Some(5), read).is_some());
+    }
+
+    #[test]
+    fn our_own_write_landing_during_a_read_is_dropped() {
+        let own = std::cell::Cell::new(None);
+        let mut seen = None;
+        // The pasteboard was cleared for our write, its count noted only
+        // while it was read.
+        let captured = read_if_changed(
+            &mut seen,
+            || Some(9),
+            || own.get(),
+            || {
+                own.set(Some(9));
+                text()
+            },
+        );
+        assert!(captured.is_none());
     }
 
     #[test]
     fn without_a_count_every_poll_reads() {
         let mut seen = None;
-        assert!(read_if_changed(&mut seen, || None, text).is_some());
-        assert!(read_if_changed(&mut seen, || None, text).is_some());
+        assert!(read_if_changed(&mut seen, || None, || None, text).is_some());
+        assert!(read_if_changed(&mut seen, || None, || None, text).is_some());
     }
 
     #[cfg(target_os = "windows")]

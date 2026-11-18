@@ -69,7 +69,8 @@ pub struct Services {
     capture_started: AtomicBool,
     #[cfg_attr(target_os = "android", allow(dead_code))]
     stop_capture: Arc<AtomicBool>,
-    recorder: Mutex<capture::Recorder>,
+    /// What the clipboard held last, shared with the desktops' monitor.
+    recorder: Arc<Mutex<capture::Recorder>>,
     host: OnceLock<Box<dyn WindowHost>>,
     prompts: SystemPrompts,
     vault: VaultService,
@@ -193,7 +194,7 @@ impl Services {
             shown: AtomicU64::new(0),
             capture_started: AtomicBool::new(false),
             stop_capture: Arc::new(AtomicBool::new(false)),
-            recorder: Mutex::new(capture::Recorder::new()),
+            recorder: Arc::new(Mutex::new(capture::Recorder::new())),
             host: OnceLock::new(),
             prompts: SystemPrompts::default(),
             sync: crate::cloud::Worker::default(),
@@ -398,9 +399,14 @@ impl Services {
         #[cfg(not(target_os = "android"))]
         if self.captures() && !self.capture_started.swap(true, Ordering::AcqRel) {
             let version = self.data_version.clone();
-            capture::spawn_monitor(self.db.clone(), self.stop_capture.clone(), move || {
-                version.fetch_add(1, Ordering::AcqRel);
-            });
+            capture::spawn_monitor(
+                self.db.clone(),
+                self.recorder.clone(),
+                self.stop_capture.clone(),
+                move || {
+                    version.fetch_add(1, Ordering::AcqRel);
+                },
+            );
         }
     }
 
@@ -425,7 +431,19 @@ impl Services {
         Ok(stored)
     }
 
+    /// Puts item `id` back on the clipboard, where it keeps its place in
+    /// the history: what is copied from the history is no news to it.
     pub fn copy_item(&self, id: i64) -> Result<(), String> {
+        let hash = self
+            .db
+            .item_hash(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "该条目已不存在".to_owned())?;
+        // Seen before it is written: the monitor may read it at once.
+        self.recorder
+            .lock()
+            .map_err(|_| "剪贴板记录器不可用".to_owned())?
+            .assume_seen(hash);
         capture::copy_item(&self.db, id)
     }
 
@@ -482,7 +500,8 @@ impl Services {
 
     /// Applies the retention again when it last was an hour or more before
     /// `now_ms`: an app left running for weeks keeps to it all the same.
-    /// On a thread of its own, which it gives when it started one.
+    /// Then gives the space deleted items left back to the disk. On a
+    /// thread of its own, which it gives when it started one.
     pub fn cleanup_when_due(&self, now_ms: u64) -> Option<std::thread::JoinHandle<()>> {
         let cleaned_at = self.cleaned_at_ms.load(Ordering::Acquire);
         // Either way: a clock set back does not put it off.
@@ -497,7 +516,10 @@ impl Services {
         let version = self.data_version.clone();
         std::thread::Builder::new()
             .name("retention".into())
-            .spawn(move || remove_expired(&db, &version))
+            .spawn(move || {
+                remove_expired(&db, &version);
+                reclaim_space(&db);
+            })
             .map_err(|e| log::error!("cannot start removing expired items: {e}"))
             .ok()
     }
@@ -565,6 +587,16 @@ fn remove_expired(db: &Database, version: &AtomicU64) {
             version.fetch_add(1, Ordering::AcqRel);
         }
         Err(e) => log::error!("cannot remove expired items: {e}"),
+    }
+}
+
+/// Gives the space that deleted items (expired, cleared or deleted one by
+/// one) left in `db` back to the disk.
+fn reclaim_space(db: &Database) {
+    match db.reclaim_space() {
+        Ok(0) => {}
+        Ok(pages) => log::info!("gave {pages} free database pages back to the disk"),
+        Err(e) => log::error!("cannot give free database pages back: {e}"),
     }
 }
 
@@ -884,6 +916,24 @@ mod tests {
             .expect("due")
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn the_retention_pass_gives_freed_space_back_to_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Services::open(dir.path());
+        s.db()
+            .insert_image_at(&vec![7; 512 * 1024], &[7], "old", "2020-01-01T00:00:00")
+            .unwrap();
+        // Shortening the retention deletes at once, on the UI thread: the
+        // space waits for the pass on a thread of its own.
+        s.set_retention_days(30).unwrap();
+        assert!(s.db().free_pages().unwrap() > 100);
+        s.cleanup_when_due(vault::now_ms() + 2 * CLEANUP_INTERVAL_MS)
+            .expect("due")
+            .join()
+            .unwrap();
+        assert_eq!(s.db().free_pages().unwrap(), 0);
     }
 
     #[test]
