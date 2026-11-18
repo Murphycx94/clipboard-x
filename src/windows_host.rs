@@ -219,6 +219,10 @@ impl WindowHost for WindowsHost {
     fn take_keyboard(&self) {
         with_host(Host::take_keyboard);
     }
+
+    fn quit(&self) {
+        with_host(Host::quit);
+    }
 }
 
 /// Where the panel goes, in pixels: `(x, y, width, height)` at the right

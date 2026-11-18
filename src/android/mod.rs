@@ -1,6 +1,6 @@
 //! What only Java reaches on Android — the Keystore, the biometric prompt,
 //! the clipboard's sensitive flag, the windows' secure flag, the files
-//! directory — through
+//! directory, the system's Downloads — through
 //! `com.clipboardx.Bridge` (`android/java`). The packaged app carries NSH's
 //! classes only, so the bridge's dex (built by `build.rs`) is loaded here at
 //! run time, into the VM that loaded us.
@@ -60,6 +60,41 @@ pub fn clear_sensitive(id: u64) -> Result<(), String> {
 pub fn set_secure(on: bool) -> Result<(), String> {
     jvm::call(|env, bridge| {
         env.call_static_method(bridge, "setSecure", "(Z)V", &[JValue::Bool(u8::from(on))])?;
+        Ok(())
+    })
+}
+
+/// Whether [`save_to_downloads`] works here (Android 10 and later).
+pub fn can_save_to_downloads() -> bool {
+    jvm::call(|env, bridge| {
+        env.call_static_method(bridge, "canSaveToDownloads", "()Z", &[])?
+            .z()
+    })
+    .inspect_err(|e| log::error!("cannot ask about Downloads: {e}"))
+    .unwrap_or(false)
+}
+
+/// Copies the file at `path` into the system's Downloads as `name`, in
+/// place of the ones earlier updates put there.
+pub fn save_to_downloads(path: &std::path::Path, name: &str) -> Result<(), String> {
+    let path = path.to_str().ok_or("the download's path is not UTF-8")?;
+    jvm::call(|env, bridge| {
+        let path = env.new_string(path)?;
+        let name = env.new_string(name)?;
+        env.call_static_method(
+            bridge,
+            "saveToDownloads",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            &[JValue::Object(&path), JValue::Object(&name)],
+        )?;
+        Ok(())
+    })
+}
+
+/// Opens the system's Downloads.
+pub fn open_downloads() -> Result<(), String> {
+    jvm::call(|env, bridge| {
+        env.call_static_method(bridge, "openDownloads", "()V", &[])?;
         Ok(())
     })
 }

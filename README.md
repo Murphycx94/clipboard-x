@@ -15,8 +15,9 @@
 5. **收藏与备注**：悬停条目可添加备注、收藏、删除；点击图片缩略图查看大图
 6. **快捷复制**：点击条目复制回剪贴板；`Enter` 或 `⌘⇧1`–`⌘⇧9` 复制并收起窗口
 7. **设置**：失焦自动隐藏、外观主题（浅色/深色/跟随系统）、历史保留时间（一周/一个月/一年/永久）、清除历史、检查更新
-8. **Telegram 同步**：配置 Bot Token 与 Chat ID 后，收藏变化时把收藏列表推送到 Telegram
-9. **密码本**：加密保存账号、密码、网址、两步验证码（TOTP）和备注，支持密码生成器、Touch ID / Windows Hello 解锁和加密备份（见下文）
+8. **应用内更新**：启动后和之后每 6 小时检查一次新版本，有新版本时主窗口右上角出现「更新」按钮，点一下即下载（显示进度）、核对 SHA-256 并安装：macOS 替换 `.app` 后自动重启；Windows 静默运行安装包后自动重启；安卓（10 及以上）把安装包存到系统「下载」并打开，点它安装。免安装版、只读位置（如直接在 dmg 里运行）和 Linux 打开发布页手动下载
+9. **Telegram 同步**：配置 Bot Token 与 Chat ID 后，收藏变化时把收藏列表推送到 Telegram
+10. **密码本**：加密保存账号、密码、网址、两步验证码（TOTP）和备注，支持密码生成器、Touch ID / Windows Hello 解锁和加密备份（见下文）
 
 ### 键盘
 
@@ -139,7 +140,7 @@ scripts\package-windows.ps1 -NoInstaller  # 只出免安装的 zip
 
 - **每次推送**：在 macOS 和 Windows 上跑 `cargo fmt --check`、`clippy -D warnings`、`cargo test --workspace`（含无头 UI 测试和端到端同步测试），并扫描提交里的密钥；同时打包 macOS 通用版（`.dmg` 和 `.app` 压缩包）、Windows 安装包与免安装 zip、安卓 APK 和同步服务器（Linux 静态编译），作为工作流产物（Actions 页面的 Artifacts）供下载。只改文档（`docs/`、`*.md`）的推送不触发。
 - **PR**：没有单独的一轮，页面上显示的是分支那次推送的结果（来自 fork 的 PR 因此不会被检查）。
-- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，等检查和打包全部通过后自动打标签并发布 GitHub Release，附带以上四种产物。应用内的"检查更新"读取的就是这里的最新版本。
+- **发布**：推送到 `main` 时，如果 `Cargo.toml` 里的版本还没有对应的 `v<版本>` 标签，等检查和打包全部通过后自动打标签并发布 GitHub Release，附带以上四种产物。应用内的"检查更新"读取的就是这里的最新版本，并按 GitHub 给出的 SHA-256 核对下载的 macOS zip、Windows 安装包和安卓 APK：这三个文件名的后缀（`-macos-universal.zip`、`-windows-x86_64-setup.exe`、`-android.apk`）不能改。
 - **发新版本的步骤**：同时修改 `Cargo.toml` 和 `nsh.json` 的 `version`（两处不一致时 CI 会失败），然后合并到 `main`。
 
 `nsh package --target macos` 也能打包，但它使用 NSH 生成的通用运行器，没有菜单栏图标、全局快捷键和浮动面板，只适合预览界面。
@@ -176,7 +177,7 @@ ClipboardX/
 │   ├── services.rs        # UI 与宿主共享的服务（数据库、变更计数、窗口桥接、同步）
 │   ├── system_prompt.rs   # 系统弹窗（如 Touch ID）期间保持面板不收起
 │   ├── telegram.rs        # 收藏同步到 Telegram
-│   ├── updater.rs         # 通过 GitHub Releases 检查新版本
+│   ├── updater/           # 应用内更新：查 GitHub Releases、下载并核对、各平台安装
 │   ├── hotkey.rs          # 快捷键字符串解析与校验
 │   ├── logger.rs          # 日志文件
 │   ├── vault/             # 密码本：加密、存储、会话与锁定、TOTP、生成器、备份、钥匙串、同步（本地部分）
@@ -186,6 +187,7 @@ ClipboardX/
 │       ├── state.rs       # 界面状态（signals）与操作
 │       ├── keys.rs        # 键盘快捷键
 │       ├── header.rs  main_panel.rs  item_row.rs  archive.rs  settings.rs  dialogs.rs
+│       ├── update.rs      # 自动检查更新与「更新」按钮的流程
 │       ├── mobile.rs  foreground.rs   # 手机布局；回到前台时读取剪贴板
 │       ├── vault/         # 密码本页面：锁屏、列表、编辑器、对话框、云同步
 │       └── widgets.rs  icons.rs
@@ -206,6 +208,6 @@ ClipboardX/
 
 - 快捷键修改后立即生效（原为重启后生效），并会校验格式。
 - 搜索同时作用于收藏夹（原仅今日历史），键盘导航也同时支持两个列表。
-- 检查更新改为查询 GitHub Releases，发现新版本后打开下载页（原为 Tauri updater 自动安装）。
+- 检查更新改为查询 GitHub Releases，自动检查并在右上角提示，点「更新」在应用内下载安装（原为 Tauri updater 自动安装）。
 - 历史保留时间改为分段按钮，不再使用下拉框。
 - 时间戳精确到毫秒，保证同一秒内的重复复制也能正确排序；旧数据兼容。

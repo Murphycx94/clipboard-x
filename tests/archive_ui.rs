@@ -51,6 +51,7 @@ fn a_long_archived_day_renders_only_the_rows_near_the_viewport() {
     // SAFETY: set before any thread of this test binary reads them.
     unsafe {
         std::env::set_var(DATA_DIR_ENV, dir.path());
+        std::env::set_var(clipboardx::updater::NO_UPDATE_CHECK_ENV, "1");
         std::env::set_var(NO_CAPTURE_ENV, "1");
     }
     seed();

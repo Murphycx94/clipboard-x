@@ -73,23 +73,45 @@ pub fn settings_page(state: AppState) -> impl IntoElement {
                         Icon::Info,
                         "当前版本",
                         concat!("v", env!("CARGO_PKG_VERSION")),
-                        text_button(
-                            move || {
-                                if state.checking_update.get() {
-                                    "检查中…"
-                                } else {
-                                    "检查更新"
-                                }
-                            },
-                            Tone::Plain,
-                            move || state.check_update(),
-                        )
-                        .disabled(move || state.checking_update.get()),
+                        update_button(state),
                     )
                     .into_element(),
                 ],
             )),
     )
+}
+
+/// 检查更新, or, once a newer version is known, the update itself (as
+/// the header's button).
+fn update_button(state: AppState) -> AnyElement {
+    let known = move || state.release.with(Option::is_some);
+    view()
+        .child(when(known, move || {
+            text_button(
+                move || super::update::button_label(state, true),
+                Tone::Primary,
+                move || state.start_update(),
+            )
+            .disabled(move || super::update::updating(state))
+        }))
+        .child(when(
+            move || !known(),
+            move || {
+                text_button(
+                    move || {
+                        if state.checking_update.get() {
+                            "检查中…"
+                        } else {
+                            "检查更新"
+                        }
+                    },
+                    Tone::Plain,
+                    move || state.check_update(),
+                )
+                .disabled(move || state.checking_update.get())
+            },
+        ))
+        .into_element()
 }
 
 /// Keeping the window out of screen captures, where it can be.
