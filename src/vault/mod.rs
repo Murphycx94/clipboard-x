@@ -2,6 +2,8 @@
 
 pub mod account_key;
 pub mod backup;
+#[cfg(any(target_os = "macos", test))]
+mod bundle_store;
 pub mod crypto;
 pub mod device_store;
 pub mod entry;
