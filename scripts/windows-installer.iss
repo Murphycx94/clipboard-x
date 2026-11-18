@@ -57,7 +57,16 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\ClipboardX.exe"; Description: "Start ClipboardX"; Flags: nowait postinstall skipifsilent
+; The app's own update runs this installer silently with /relaunch=1
+; (src/updater/windows.rs), having quit: the new version starts.
+Filename: "{app}\ClipboardX.exe"; Flags: nowait skipifnotsilent; Check: RelaunchAfterUpdate
 
 [UninstallRun]
 ; The app runs in the tray: it has to go before its file can.
 Filename: "{sys}\taskkill.exe"; Parameters: "/IM ClipboardX.exe /F"; Flags: runhidden; RunOnceId: "StopClipboardX"
+
+[Code]
+function RelaunchAfterUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;

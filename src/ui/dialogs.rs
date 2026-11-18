@@ -20,7 +20,6 @@ pub fn dialogs(state: AppState) -> impl IntoElement {
             telegram_dialog(state)
         }))
         .child(when(is(DialogKind::Logs), move || logs_dialog(state)))
-        .child(when(is(DialogKind::Update), move || update_dialog(state)))
         .child(when(is(DialogKind::ConfirmClear), move || {
             confirm_clear_dialog(state)
         }))
@@ -203,41 +202,6 @@ fn logs_dialog(state: AppState) -> impl IntoElement {
                 })),
         );
     modal(state, "同步日志", 380.0, content)
-}
-
-fn update_dialog(state: AppState) -> impl IntoElement {
-    let release = move || state.release.get();
-    let title = untracked(move || {
-        release().map_or_else(
-            || "发现新版本".to_owned(),
-            |r| format!("发现新版本 v{}", r.version),
-        )
-    });
-    let content = view()
-        .child(
-            scroll().max_h(px(260.0)).child(
-                text(move || {
-                    release()
-                        .map(|r| r.notes)
-                        .filter(|n| !n.is_empty())
-                        .unwrap_or_else(|| "有新版本可用，是否前往下载？".to_owned())
-                })
-                .text_xs()
-                .select_text()
-                .text_color(move || theme().foreground),
-            ),
-        )
-        .child(buttons(vec![
-            text_button("稍后再说", Tone::Plain, move || state.dialog.set(None)).into_element(),
-            text_button("前往下载", Tone::Primary, move || {
-                if let Some(release) = release() {
-                    drop(open_url(release.url));
-                }
-                state.dialog.set(None);
-            })
-            .into_element(),
-        ]));
-    modal(state, title, 340.0, content)
 }
 
 fn confirm_clear_dialog(state: AppState) -> impl IntoElement {

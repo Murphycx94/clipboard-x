@@ -28,6 +28,7 @@ impl WindowHost for RecordingHost {
         self.capture_hidden.lock().unwrap().push(hidden);
     }
     fn take_keyboard(&self) {}
+    fn quit(&self) {}
 }
 
 fn seed() {
@@ -70,7 +71,12 @@ fn browsing_searching_and_clearing_history() {
     // SAFETY: set before any thread of this test binary reads them.
     unsafe {
         std::env::set_var(DATA_DIR_ENV, dir.path());
+        std::env::set_var(clipboardx::updater::NO_UPDATE_CHECK_ENV, "1");
         std::env::set_var(NO_CAPTURE_ENV, "1");
+        std::env::set_var(
+            clipboardx::updater::RELEASE_JSON_ENV,
+            release_json(dir.path()),
+        );
     }
     seed();
     let host = RecordingHost::default();
@@ -147,4 +153,24 @@ fn browsing_searching_and_clearing_history() {
     app.settle();
     assert!(!services().db().settings().unwrap().hide_from_capture);
     assert_eq!(*host.capture_hidden.lock().unwrap(), vec![false]);
+
+    // Checking for updates finds a newer version: settings and the header
+    // offer it.
+    assert!(!app.shows("更新"));
+    app.press("检查更新").unwrap();
+    app.wait_for("发现新版本 v99.0.0，点右上角「更新」")
+        .unwrap();
+    assert!(app.shows("更新到 v99.0.0"));
+    assert!(app.shows("更新"));
+}
+
+/// A release newer than any build, as GitHub's API describes it, in `dir`.
+fn release_json(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("release.json");
+    std::fs::write(
+        &path,
+        r#"{"tag_name":"v99.0.0","body":"- 新功能","html_url":"https://example.com/r","assets":[]}"#,
+    )
+    .unwrap();
+    path
 }

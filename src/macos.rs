@@ -104,6 +104,10 @@ impl WindowHost for MacHost {
     fn take_keyboard(&self) {
         with_host(Host::take_keyboard);
     }
+
+    fn quit(&self) {
+        with_host(Host::quit);
+    }
 }
 
 define_class!(
@@ -162,6 +166,13 @@ impl Host {
         if self.is_shown() {
             self.panel.makeKeyWindow();
         }
+    }
+
+    fn quit(&self) {
+        // `terminate:` exits the process: stop the engine first.
+        self.view.stop();
+        let mtm = MainThreadMarker::from(&*self.panel);
+        NSApplication::sharedApplication(mtm).terminate(None);
     }
 
     fn toggle(&self) {
@@ -380,10 +391,7 @@ fn listen_to_events() {
             if event.id == *host.show_item.id() {
                 host.show();
             } else if event.id == *host.quit_item.id() {
-                // `terminate:` exits the process: stop the engine first.
-                host.view.stop();
-                let mtm = MainThreadMarker::from(&*host.panel);
-                NSApplication::sharedApplication(mtm).terminate(None);
+                host.quit();
             }
         });
     }));

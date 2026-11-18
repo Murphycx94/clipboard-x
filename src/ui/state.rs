@@ -11,6 +11,8 @@ use crate::services::services;
 use crate::updater::Release;
 use crate::vault::{EntrySummary, VaultStatus};
 
+use super::update::UpdatePhase;
+
 /// How long the "copied" check stays on a row.
 const COPIED_FLASH: Duration = Duration::from_millis(1000);
 /// How long a toast shows.
@@ -39,7 +41,6 @@ pub enum DialogKind {
     Image,
     Telegram,
     Logs,
-    Update,
     ConfirmClear,
     VaultEditor,
     VaultConfirmDelete,
@@ -145,8 +146,10 @@ pub struct AppState {
     pub note_draft: Signal<String>,
     pub preview_src: Signal<String>,
     pub logs: Signal<String>,
+    /// A newer version, once a check found one: the header shows 更新.
     pub release: Signal<Option<Release>>,
     pub checking_update: Signal<bool>,
+    pub update_phase: Signal<UpdatePhase>,
     pub toast: Signal<Option<Toast>>,
     pub list: ElementRef,
     pub search: ElementRef,
@@ -231,6 +234,7 @@ impl AppState {
             logs: signal(String::new()),
             release: signal(None),
             checking_update: signal(false),
+            update_phase: signal(UpdatePhase::Idle),
             toast: signal(None),
             list: element_ref(),
             search: element_ref(),
@@ -670,29 +674,5 @@ impl AppState {
     pub fn show_logs(self) {
         self.logs.set(crate::logger::contents());
         self.dialog.set(Some(DialogKind::Logs));
-    }
-
-    pub fn check_update(self) {
-        if self.checking_update.get() {
-            return;
-        }
-        self.checking_update.set(true);
-        spawn(async move {
-            let result = blocking(crate::updater::check)
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            self.checking_update.set(false);
-            match result {
-                Ok(Some(release)) => {
-                    self.release.set(Some(release));
-                    self.dialog.set(Some(DialogKind::Update));
-                }
-                Ok(None) => self.success("当前已是最新版本"),
-                Err(e) => {
-                    log::warn!("update check failed: {e}");
-                    self.error("检查更新失败，请稍后重试");
-                }
-            }
-        });
     }
 }

@@ -70,6 +70,7 @@ fn a_phone_records_on_return_and_acts_on_long_press() {
     // clipboard is the headless one: capture stays on.
     unsafe {
         std::env::set_var(DATA_DIR_ENV, dir.path());
+        std::env::set_var(clipboardx::updater::NO_UPDATE_CHECK_ENV, "1");
         std::env::set_var(NO_KEYCHAIN_ENV, "1");
     }
     let mut app = start_phone();

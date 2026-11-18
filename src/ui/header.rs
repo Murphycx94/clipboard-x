@@ -1,13 +1,14 @@
 //! The bar at the top: the app's name and its pages (on a phone the
 //! system tab bar has the pages: only the way back from the archive).
 
-use nsh_base::theme;
+use nsh_base::{theme, tooltip};
 use nsh_core::prelude::*;
 
 use super::icons::{Icon, icon};
 use super::mobile::is_touch;
 use super::state::{AppState, Page};
-use super::widgets::{icon_button, muted};
+use super::update::{button_label, release_hint, updating};
+use super::widgets::{Tone, icon_button, muted, text_button};
 
 pub fn header(state: AppState) -> impl IntoElement {
     let touch = is_touch();
@@ -56,15 +57,62 @@ pub fn header(state: AppState) -> impl IntoElement {
                     .text_color(muted),
                 ),
         )
-        .child(when(
-            move || touch && state.page.get() == Page::Archive,
-            move || {
-                icon_button(Icon::Close, "返回历史", muted, move || {
-                    state.page.set(Page::Main)
-                })
-            },
-        ))
-        .child(when(move || !touch, move || page_buttons(state)))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(when(
+                    move || state.release.with(Option::is_some),
+                    move || update_button(state),
+                ))
+                .child(when(
+                    move || touch && state.page.get() == Page::Archive,
+                    move || {
+                        icon_button(Icon::Close, "返回历史", muted, move || {
+                            state.page.set(Page::Main)
+                        })
+                    },
+                ))
+                .child(when(move || !touch, move || page_buttons(state))),
+        )
+}
+
+/// 更新, once a check found a newer version (as VS Code's): it downloads
+/// the version, installs it and restarts, showing how far it is.
+fn update_button(state: AppState) -> impl IntoElement {
+    view()
+        .window_drag(false)
+        .tooltip(
+            tooltip()
+                .rounded(px(6.0))
+                .bg(move || theme().foreground)
+                .px(px(8.0))
+                .py(px(4.0))
+                .max_w(px(260.0))
+                .child(
+                    text(move || {
+                        state
+                            .release
+                            .with(|r| r.as_ref().map(release_hint))
+                            .unwrap_or_default()
+                    })
+                    .text_xs()
+                    .text_color(move || theme().background),
+                ),
+        )
+        .child(
+            text_button(
+                move || button_label(state, false),
+                Tone::Primary,
+                move || state.start_update(),
+            )
+            .accessibility_label("更新")
+            .h(px(24.0))
+            .px(px(10.0))
+            .rounded(px(6.0))
+            .disabled(move || updating(state)),
+        )
 }
 
 /// The desktop's page buttons and the window's close button.

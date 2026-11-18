@@ -11,6 +11,7 @@ mod main_panel;
 mod mobile;
 mod settings;
 mod state;
+mod update;
 mod vault;
 mod widgets;
 
@@ -41,6 +42,7 @@ pub fn App() -> impl IntoElement {
     state.reload();
     state.apply_theme();
     state.watch_services();
+    state.watch_updates();
 
     let page_is = move |page: Page| move || state.page.get() == page;
     view()

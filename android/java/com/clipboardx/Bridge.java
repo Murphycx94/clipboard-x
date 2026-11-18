@@ -2,19 +2,25 @@ package com.clipboardx;
 
 import android.app.Activity;
 import android.app.Application;
+import android.app.DownloadManager;
 import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PersistableBundle;
+import android.provider.MediaStore;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
@@ -22,6 +28,9 @@ import android.util.Log;
 import android.view.Window;
 import android.view.WindowManager;
 
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.security.KeyStore;
 import java.util.ArrayList;
@@ -40,8 +49,8 @@ import javax.crypto.spec.GCMParameterSpec;
 
 /**
  * What ClipboardX's Rust code needs from Android that only Java reaches: the
- * Keystore, the biometric prompt, the clipboard's sensitive flag and the
- * windows' secure flag. Loaded by
+ * Keystore, the biometric prompt, the clipboard's sensitive flag, the
+ * windows' secure flag and the system's Downloads (updates). Loaded by
  * Rust at run time (InMemoryDexClassLoader); every method is static.
  *
  * Errors are exceptions whose message Rust reads: "canceled" (the user closed
@@ -375,6 +384,72 @@ public final class Bridge {
         @Override public void onActivitySaveInstanceState(Activity activity, Bundle state) {}
 
         @Override public void onActivityDestroyed(Activity activity) {}
+    }
+
+    // --- Updates ------------------------------------------------------------
+
+    private static final String APK_TYPE = "application/vnd.android.package-archive";
+    /** What earlier updates left in Downloads (the system may add " (1)"). */
+    private static final String OUR_APKS = "ClipboardX-%-android%.apk";
+
+    /**
+     * Whether {@link #saveToDownloads} works here: MediaStore's Downloads
+     * (Android 10) take an app's files without a storage permission.
+     */
+    public static boolean canSaveToDownloads() {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
+    }
+
+    /**
+     * Copies the file at {@code path} into the system's Downloads as
+     * {@code name}, in place of the ones earlier updates put there. The
+     * app cannot start the installer itself (NSH's manifest does not ask
+     * for REQUEST_INSTALL_PACKAGES): the user installs it from there.
+     */
+    public static void saveToDownloads(String path, String name) throws Exception {
+        if (!canSaveToDownloads()) {
+            throw new IllegalStateException("Downloads need Android 10");
+        }
+        ContentResolver resolver = context().getContentResolver();
+        Uri downloads = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+        try {
+            // Only this app's own files are visible to it, so only they go.
+            resolver.delete(downloads, MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?",
+                    new String[] {OUR_APKS});
+        } catch (RuntimeException e) {
+            Log.w(TAG, "cannot remove earlier updates from Downloads", e);
+        }
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        values.put(MediaStore.MediaColumns.MIME_TYPE, APK_TYPE);
+        values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+        Uri item = resolver.insert(downloads, values);
+        if (item == null) {
+            throw new IllegalStateException("Downloads refused the file");
+        }
+        try (InputStream in = new FileInputStream(path);
+                OutputStream out = resolver.openOutputStream(item)) {
+            if (out == null) {
+                throw new IllegalStateException("cannot write to Downloads");
+            }
+            byte[] buffer = new byte[64 * 1024];
+            for (int n; (n = in.read(buffer)) > 0; ) {
+                out.write(buffer, 0, n);
+            }
+        } catch (Exception e) {
+            resolver.delete(item, null, null);
+            throw e;
+        }
+        values.clear();
+        values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+        resolver.update(item, values, null, null);
+    }
+
+    /** Opens the system's Downloads, where the user taps the APK to install it. */
+    public static void openDownloads() throws Exception {
+        Intent intent = new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context().startActivity(intent);
     }
 
     private static ClipboardManager clipboard() throws Exception {

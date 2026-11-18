@@ -39,6 +39,8 @@ pub trait WindowHost: Send + Sync {
     /// Gives the keyboard back to the window if it is shown: a system
     /// prompt (Touch ID) had it.
     fn take_keyboard(&self);
+    /// Ends the app, as the tray menu's 退出 does (an update installed).
+    fn quit(&self);
 }
 
 /// What the host's window does when it loses the keyboard.
@@ -252,6 +254,12 @@ impl Services {
         if let Some(host) = self.host.get() {
             host.hide();
         }
+    }
+
+    /// Ends the app; `false` without a host to end it (Linux's plain
+    /// window, Android).
+    pub fn quit_app(&self) -> bool {
+        self.host.get().map(|host| host.quit()).is_some()
     }
 
     /// What the host's window does now that it lost the keyboard: hides
@@ -634,6 +642,7 @@ mod tests {
         hotkeys: Mutex<Vec<String>>,
         capture_hidden: Mutex<Vec<bool>>,
         keyboard_taken: AtomicU64,
+        quits: AtomicU64,
     }
 
     impl WindowHost for Arc<FakeHost> {
@@ -649,6 +658,9 @@ mod tests {
         }
         fn take_keyboard(&self) {
             self.keyboard_taken.fetch_add(1, Ordering::Relaxed);
+        }
+        fn quit(&self) {
+            self.quits.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -777,6 +789,7 @@ mod tests {
         let s = services();
         s.hide_window();
         assert!(!s.has_host());
+        assert!(!s.quit_app());
         s.set_hotkey("Alt+Space").unwrap();
 
         let host = Arc::new(FakeHost::default());
@@ -784,6 +797,8 @@ mod tests {
         assert!(s.has_host());
         s.hide_window();
         assert_eq!(host.hidden.load(Ordering::Relaxed), 1);
+        assert!(s.quit_app());
+        assert_eq!(host.quits.load(Ordering::Relaxed), 1);
         s.set_hotkey("Ctrl+Shift+K").unwrap();
         assert_eq!(*host.hotkeys.lock().unwrap(), vec!["Ctrl+Shift+K"]);
         assert_eq!(s.db().settings().unwrap().hotkey, "Ctrl+Shift+K");
