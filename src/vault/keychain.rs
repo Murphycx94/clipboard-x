@@ -120,6 +120,10 @@ mod mac {
     use objc2_local_authentication::{LAContext, LAPolicy};
     use zeroize::Zeroizing;
 
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+    use security_framework::passwords;
+
+    use super::super::bundle_store::{Backend, BundleStore};
     use super::{KeyItem, KeyStore};
 
     const SERVICE: &str = "com.clipboardx.app.vault";
@@ -127,8 +131,60 @@ mod mac {
     /// errSecItemNotFound: deleting what is not there.
     const NOT_FOUND: i32 = -25300;
 
-    /// The login keychain, items readable by this app only.
-    pub struct MacKeyStore;
+    /// The login keychain, the items in one entry of this version (see
+    /// `bundle_store`), readable by this app only.
+    pub struct MacKeyStore(BundleStore<LoginKeychain>);
+
+    impl MacKeyStore {
+        pub fn new() -> MacKeyStore {
+            let keychain = LoginKeychain { service: SERVICE };
+            MacKeyStore(BundleStore::new(keychain, env!("CARGO_PKG_VERSION")))
+        }
+    }
+
+    /// The service's entries in the login keychain.
+    pub struct LoginKeychain {
+        service: &'static str,
+    }
+
+    impl Backend for LoginKeychain {
+        fn names(&self) -> Result<Vec<String>, String> {
+            let found = ItemSearchOptions::new()
+                .class(ItemClass::generic_password())
+                .service(self.service)
+                .load_attributes(true)
+                .limit(Limit::All)
+                .search();
+            match found {
+                Ok(results) => Ok(results
+                    .iter()
+                    .filter_map(|r| r.simplify_dict()?.get("acct").cloned())
+                    .collect()),
+                Err(e) if e.code() == NOT_FOUND => Ok(Vec::new()),
+                Err(e) => Err(format!("无法读取钥匙串：{e}")),
+            }
+        }
+
+        fn read(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+            match passwords::get_generic_password(self.service, name) {
+                Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+                Err(e) if e.code() == NOT_FOUND => Ok(None),
+                Err(e) => Err(format!("无法读取钥匙串：{e}")),
+            }
+        }
+
+        fn write(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+            passwords::set_generic_password(self.service, name, bytes)
+                .map_err(|e| format!("无法写入钥匙串：{e}"))
+        }
+
+        fn remove(&self, name: &str) -> Result<(), String> {
+            match passwords::delete_generic_password(self.service, name) {
+                Err(e) if e.code() != NOT_FOUND => Err(e.to_string()),
+                _ => Ok(()),
+            }
+        }
+    }
 
     fn context() -> Retained<LAContext> {
         // SAFETY: plain allocation and init of LAContext.
@@ -174,28 +230,81 @@ mod mac {
         }
 
         fn put(&self, item: KeyItem, bytes: &[u8]) -> Result<(), String> {
-            security_framework::passwords::set_generic_password(SERVICE, item.account(), bytes)
-                .map_err(|e| format!("无法写入钥匙串：{e}"))
+            self.0.put(item, bytes)
         }
 
         fn get(&self, item: KeyItem) -> Option<Zeroizing<Vec<u8>>> {
-            security_framework::passwords::get_generic_password(SERVICE, item.account())
+            self.0
+                .get(item)
+                .inspect_err(|e| log::warn!("cannot read {item:?}: {e}"))
                 .ok()
-                .map(Zeroizing::new)
+                .flatten()
         }
 
         fn get_with_auth(&self, item: KeyItem, reason: &str) -> Result<Zeroizing<Vec<u8>>, String> {
             confirm_user(reason)?;
-            self.get(item).ok_or_else(|| "钥匙串中没有密钥".to_owned())
+            self.0
+                .get(item)?
+                .ok_or_else(|| "钥匙串中没有密钥".to_owned())
+        }
+
+        /// Without asking; when the keychain cannot tell, stored: a key
+        /// that is there must not be taken for gone (Touch ID would be
+        /// turned off).
+        fn contains(&self, item: KeyItem) -> bool {
+            self.0
+                .contains(item)
+                .inspect_err(|e| log::warn!("cannot look for {item:?}: {e}"))
+                .unwrap_or(true)
         }
 
         fn delete(&self, item: KeyItem) {
-            if let Err(e) =
-                security_framework::passwords::delete_generic_password(SERVICE, item.account())
-                && e.code() != NOT_FOUND
-            {
+            if let Err(e) = self.0.delete(item) {
                 log::warn!("cannot delete keychain item {item:?}: {e}");
             }
+        }
+    }
+
+    /// The real login keychain, under a service of its own, entries this
+    /// test writes only (nothing asks): `cargo test -- --ignored login_keychain`.
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const TEST_SERVICE: &str = "com.clipboardx.test.bundle";
+
+        #[test]
+        #[ignore]
+        fn login_keychain_round_trip() {
+            let keychain = LoginKeychain {
+                service: TEST_SERVICE,
+            };
+            let store = BundleStore::new(
+                LoginKeychain {
+                    service: TEST_SERVICE,
+                },
+                "9.9.9",
+            );
+            assert_eq!(keychain.names().unwrap(), Vec::<String>::new());
+            assert!(keychain.read("keys-9.9.9").unwrap().is_none());
+
+            store.put(KeyItem::SecretKey, b"sk").unwrap();
+            store.put(KeyItem::DeviceToken, b"token").unwrap();
+            assert_eq!(keychain.names().unwrap(), vec!["keys-9.9.9"]);
+            assert_eq!(
+                store.get(KeyItem::SecretKey).unwrap().unwrap().as_slice(),
+                b"sk"
+            );
+            store.delete(KeyItem::SecretKey).unwrap();
+            assert!(store.get(KeyItem::SecretKey).unwrap().is_none());
+            assert_eq!(
+                store.get(KeyItem::DeviceToken).unwrap().unwrap().as_slice(),
+                b"token"
+            );
+
+            keychain.remove("keys-9.9.9").unwrap();
+            keychain.remove("keys-9.9.9").unwrap();
+            assert_eq!(keychain.names().unwrap(), Vec::<String>::new());
         }
     }
 }
@@ -213,7 +322,7 @@ pub fn platform(data_dir: &std::path::Path) -> Box<dyn KeyStore> {
     #[cfg(target_os = "macos")]
     {
         let _ = data_dir;
-        Box::new(mac::MacKeyStore)
+        Box::new(mac::MacKeyStore::new())
     }
     #[cfg(target_os = "android")]
     {
