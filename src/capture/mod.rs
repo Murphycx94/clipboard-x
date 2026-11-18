@@ -132,29 +132,35 @@ impl Recorder {
         Recorder::default()
     }
 
-    /// Stores `captured` unless it is what was seen last or a secret we
-    /// copied; how it stored it, if it did.
+    /// Stores `captured` unless [`admit`](Self::admit) leaves it out; how
+    /// it stored it, if it did.
     pub fn observe(
         &mut self,
         db: &Database,
         captured: &Captured,
     ) -> Result<Option<Stored>, String> {
         let hash = captured.hash();
-        if hash == self.last_hash {
-            return Ok(None);
-        }
-        let is_secret = is_recent_secret(&hash);
-        // Seen either way: a failed store is not retried on every poll.
-        self.last_hash = hash.clone();
-        if is_secret {
+        if !self.admit(&hash) {
             return Ok(None);
         }
         captured.store(db, &hash).map(Some)
     }
 
-    /// The hash of what was observed last.
-    pub fn last_hash(&self) -> &str {
-        &self.last_hash
+    /// Whether content hashing to `hash` is to be stored: not when it is
+    /// what was seen last or a secret we copied. Seen either way: a failed
+    /// store is not retried on every poll.
+    pub fn admit(&mut self, hash: &str) -> bool {
+        if hash == self.last_hash {
+            return false;
+        }
+        self.last_hash = hash.to_owned();
+        !is_recent_secret(hash)
+    }
+
+    /// Takes content hashing to `hash` as seen: an item the history puts
+    /// back on the clipboard is no news, and keeps its place.
+    pub fn assume_seen(&mut self, hash: String) {
+        self.last_hash = hash;
     }
 }
 
@@ -438,6 +444,32 @@ mod tests {
         // Copied again after something else: back to the front.
         assert_eq!(recorder.observe(&db, &first), Ok(Some(Stored::Moved)));
         assert_eq!(db.today_items().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn what_the_history_put_back_keeps_its_place() {
+        let db = Database::in_memory().unwrap();
+        let mut recorder = Recorder::new();
+        let older = Captured::Text("recorder-older".into());
+        let newer = Captured::Text("recorder-newer".into());
+        db.insert_text_at("recorder-older", &older.hash(), "2026-01-01T09:00:00")
+            .unwrap();
+        db.insert_text_at("recorder-newer", &newer.hash(), "2026-01-01T10:00:00")
+            .unwrap();
+        // Copied from the history: on the clipboard, but no news.
+        recorder.assume_seen(older.hash());
+        assert_eq!(recorder.observe(&db, &older), Ok(None));
+        let order: Vec<_> = db
+            .archive_groups()
+            .unwrap()
+            .into_iter()
+            .flat_map(|g| g.items)
+            .filter_map(|i| i.text_preview)
+            .collect();
+        assert_eq!(order, ["recorder-newer", "recorder-older"]);
+        // Something else, then the same copied anew: back to the front.
+        assert!(recorder.admit(&newer.hash()));
+        assert_eq!(recorder.observe(&db, &older), Ok(Some(Stored::Moved)));
     }
 
     #[test]
