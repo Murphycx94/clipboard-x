@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs the ClipboardX sync server on this machine (a Debian/Ubuntu LXC)
 # behind Caddy: the server listens on 127.0.0.1 only, Caddy serves it over
-# HTTPS on the domain and keeps the domain on the home's address (DDNS).
+# HTTPS on the domain and keeps the domain on the home's address (DDNS); a
+# timer removes the addresses the home had before from the domain.
 #
 #   sudo ./install.sh ./clipboardx-sync-server ./caddy
 #
@@ -18,6 +19,11 @@ caddy_env="$conf/caddy.env"
 
 if [[ $EUID -ne 0 ]]; then
   echo "run as root (sudo)" >&2
+  exit 1
+fi
+# The DNS cleanup (clipboardx-ddns-prune) is a Python script.
+if [[ ! -x /usr/bin/python3 ]]; then
+  echo "python3 is missing: apt-get install -y python3, then run this again." >&2
   exit 1
 fi
 
@@ -67,11 +73,17 @@ install -m 0644 "$here/clipboardx-caddy.service" /etc/systemd/system/clipboardx-
   /usr/local/bin/clipboardx-caddy validate --config "$conf/Caddyfile" --adapter caddyfile >/dev/null
 )
 
+# --- DNS cleanup: the dynamic DNS adds each new address and leaves the ---
+# --- old ones; a timer deletes those that are not the address now --------
+install -m 0755 "$here/clipboardx-ddns-prune" /usr/local/bin/clipboardx-ddns-prune
+install -m 0644 "$here/clipboardx-ddns-prune.service" /etc/systemd/system/clipboardx-ddns-prune.service
+install -m 0644 "$here/clipboardx-ddns-prune.timer" /etc/systemd/system/clipboardx-ddns-prune.timer
+
 systemctl daemon-reload
 started="$(date '+%Y-%m-%d %H:%M:%S')"
-systemctl enable clipboardx-sync clipboardx-caddy
+systemctl enable clipboardx-sync clipboardx-caddy clipboardx-ddns-prune.timer
 # Restart, not start: an upgrade must run the new binaries.
-systemctl restart clipboardx-sync clipboardx-caddy
+systemctl restart clipboardx-sync clipboardx-caddy clipboardx-ddns-prune.timer
 sleep 2
 systemctl --no-pager --lines=0 status clipboardx-sync clipboardx-caddy || true
 

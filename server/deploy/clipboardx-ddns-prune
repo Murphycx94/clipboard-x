@@ -1,0 +1,450 @@
+#!/usr/bin/python3 -I
+"""Removes the DNS records the dynamic DNS left behind.
+
+Caddy's dynamic DNS adds a record for each new address and never takes the
+old one away (the Alibaba Cloud DNS module looks a record up by its value,
+so one with another value is not found). Clients would go on trying
+addresses that are no longer this server's, and whoever holds one of them
+next could answer for the name.
+
+Of the server's A records, and of its AAAA records, this keeps the one
+with the address the server has now and deletes the others. It deletes
+nothing when it cannot tell that address, or when no record has it yet: a
+record deleted by mistake would stay missing until the address next
+changes, as the dynamic DNS publishes only then. Records of other names, of
+other types, disabled or locked ones are left alone.
+
+    clipboardx-ddns-prune [--dry-run]
+    clipboardx-ddns-prune --self-test
+
+SYNC_ZONE, SYNC_NAME, ALIYUN_ACCESS_KEY_ID and ALIYUN_ACCESS_KEY_SECRET come
+from the environment: the systemd unit loads /etc/clipboardx-sync/caddy.env.
+"""
+
+import base64
+import hashlib
+import hmac
+import http.client
+import ipaddress
+import json
+import os
+import secrets
+import socket
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API_HOST = "alidns.aliyuncs.com"
+API_VERSION = "2015-01-09"
+TIMEOUT_SECONDS = 20
+PAGE_SIZE = 500
+# A name with more records than this is not one this script understands.
+MAX_PAGES = 4
+PRUNED_TYPES = ("A", "AAAA")
+# At most this many at once; the rest at the next run.
+MAX_DELETIONS = 50
+
+# Services that answer with the address a request comes from, as the dynamic
+# DNS asks them: the public IPv4 address is the one two of them agree on.
+ECHO_SERVICES = (
+    ("icanhazip.com", "/"),
+    ("ifconfig.me", "/ip"),
+    ("ident.me", "/"),
+    ("ipecho.net", "/plain"),
+)
+ECHOES_TO_AGREE = 2
+ECHO_TIMEOUT_SECONDS = 8
+# Any address out on the internet: which of this machine's addresses would
+# reach it is this machine's public IPv6 address.
+IPV6_ELSEWHERE = "2400:3200::1"
+
+# Syslog levels, as the journal reads them at the start of a line.
+ERROR, WARNING, NOTICE, INFO = 3, 4, 5, 6
+
+
+class ApiError(Exception):
+    """The API refused, could not be reached, or answered what this script
+    does not understand."""
+
+
+def say(level, text):
+    """Prints `text`; under systemd, at `level` (the unit keeps what is a
+    notice or worse: a run that finds nothing leaves no line)."""
+    prefix = f"<{level}>" if "JOURNAL_STREAM" in os.environ else ""
+    print(f"{prefix}{text}", file=sys.stderr if level <= ERROR else sys.stdout, flush=True)
+
+
+def encode(text):
+    """Percent-encoding as the API signs it (RFC 3986)."""
+    return urllib.parse.quote(str(text), safe="~")
+
+
+def canonical(query):
+    """`query` (a dict) as the API signs it: sorted, encoded."""
+    return "&".join(f"{encode(k)}={encode(v)}" for k, v in sorted(query.items()))
+
+
+def signature(secret, query):
+    """The signature of a GET request with `query` (a dict)."""
+    to_sign = "GET&%2F&" + encode(canonical(query))
+    digest = hmac.new((secret + "&").encode(), to_sign.encode(), hashlib.sha1).digest()
+    return base64.b64encode(digest).decode()
+
+
+def call(key_id, secret, action, **params):
+    """One API call; its answer."""
+    query = {
+        "Format": "JSON",
+        "Version": API_VERSION,
+        "AccessKeyId": key_id,
+        "SignatureMethod": "HMAC-SHA1",
+        "SignatureVersion": "1.0",
+        "SignatureNonce": secrets.token_hex(16),
+        "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "Action": action,
+        **params,
+    }
+    signed = encode(signature(secret, query))
+    url = f"https://{API_HOST}/?{canonical(query)}&Signature={signed}"
+    # Never the URL in what is said of a failure: it holds the key's id.
+    try:
+        with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        body = error.read(2048).decode(errors="replace")
+        try:
+            said = json.loads(body)
+            detail = f"{said.get('Code')}: {said.get('Message')}"
+        except (ValueError, AttributeError):
+            detail = body[:200]
+        raise ApiError(f"{action}: HTTP {error.code} {detail}") from None
+    except urllib.error.URLError as error:
+        raise ApiError(f"{action}: {error.reason}") from None
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        raise ApiError(f"{action}: {type(error).__name__}") from None
+
+
+def page_of(answer):
+    """One page of a list of records: its records and the count of all.
+    An ApiError when the answer is not such a list."""
+    try:
+        batch = answer["DomainRecords"]["Record"]
+        total = int(answer["TotalCount"])
+        whole = isinstance(batch, list) and all("RecordId" in record for record in batch)
+    except (KeyError, TypeError, ValueError):
+        whole = False
+    if not whole:
+        raise ApiError("the answer is not a list of records")
+    return batch, total
+
+
+def records_of(key_id, secret, zone, name):
+    """Every record of `name` in `zone`. An ApiError when the list cannot
+    be told to be whole: deciding on a part of it could delete the record
+    in use."""
+    found = {}
+    for page in range(1, MAX_PAGES + 1):
+        answer = call(
+            key_id, secret, "DescribeSubDomainRecords",
+            SubDomain=f"{name}.{zone}", DomainName=zone,
+            PageNumber=page, PageSize=PAGE_SIZE,
+        )
+        batch, total = page_of(answer)
+        # By id: a record made while the pages are read can come twice.
+        for record in batch:
+            found[str(record["RecordId"])] = record
+        if len(found) == total:
+            return list(found.values())
+        if not batch:
+            break
+    raise ApiError(f"the records of {name}.{zone} could not be listed whole")
+
+
+def address_of(text):
+    """`text` as an address, to compare however it is spelled; None when it
+    is not one."""
+    try:
+        return ipaddress.ip_address(str(text).strip())
+    except ValueError:
+        return None
+
+
+def candidates(records, name):
+    """The records this script may delete, by type and line: `name`'s A and
+    AAAA records that are in use and not locked."""
+    groups = {}
+    for record in records:
+        ours = (
+            str(record.get("RR", "")).lower() == name.lower()
+            and record.get("Type") in PRUNED_TYPES
+            and record.get("Status", "ENABLE") == "ENABLE"
+            and not record.get("Locked")
+        )
+        if ours:
+            groups.setdefault((record["Type"], record.get("Line")), []).append(record)
+    return groups
+
+
+def stale(records, name, in_use):
+    """The records to delete. `in_use`: the server's address now by record
+    type, where known. Of each type (and line) of `name`, every record with
+    another address, once one has that address."""
+    doomed = []
+    for (kind, _line), group in candidates(records, name).items():
+        address = in_use.get(kind)
+        addresses = [address_of(record.get("Value")) for record in group]
+        # Not known, not published yet, or a value that is no address.
+        if address is None or address not in addresses or None in addresses:
+            continue
+        doomed.extend(r for r, its in zip(group, addresses) if its != address)
+    return doomed
+
+
+def echoed(host, path):
+    """The address `host` sees a request over IPv4 come from; None when it
+    does not say."""
+    try:
+        # From an IPv4 address: over IPv4.
+        connection = http.client.HTTPSConnection(
+            host, timeout=ECHO_TIMEOUT_SECONDS, source_address=("0.0.0.0", 0)
+        )
+        try:
+            connection.request("GET", path, headers={"User-Agent": "clipboardx-ddns-prune"})
+            response = connection.getresponse()
+            text = response.read(64).decode("ascii", "replace") if response.status == 200 else ""
+        finally:
+            connection.close()
+        address = ipaddress.IPv4Address(text.strip())
+    except (OSError, http.client.HTTPException, ValueError):
+        return None
+    return address if address.is_global else None
+
+
+def seen_ipv4():
+    """The public IPv4 address this server is reached at (the home's, which
+    the router forwards): what two of the services agree on, else None."""
+    seen = {}
+    for host, path in ECHO_SERVICES:
+        address = echoed(host, path)
+        if address is None:
+            continue
+        seen[address] = seen.get(address, 0) + 1
+        if seen[address] >= ECHOES_TO_AGREE:
+            return address
+    return None
+
+
+def own_ipv6():
+    """This machine's public IPv6 address: the one it would reach the
+    internet from (asking sends nothing). None without one."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as probe:
+            probe.connect((IPV6_ELSEWHERE, 53))
+            address = ipaddress.IPv6Address(probe.getsockname()[0].split("%")[0])
+    except (OSError, ValueError):
+        return None
+    return address if address.is_global else None
+
+
+ADDRESS_NOW = {"A": seen_ipv4, "AAAA": own_ipv6}
+
+
+def prune(env, dry_run):
+    """Deletes the stale records; how many."""
+    missing = [
+        name
+        for name in ("SYNC_ZONE", "SYNC_NAME", "ALIYUN_ACCESS_KEY_ID", "ALIYUN_ACCESS_KEY_SECRET")
+        if not env.get(name)
+    ]
+    if missing:
+        raise ApiError(f"not set: {', '.join(missing)}")
+    key_id, secret = env["ALIYUN_ACCESS_KEY_ID"], env["ALIYUN_ACCESS_KEY_SECRET"]
+    zone, name = env["SYNC_ZONE"], env["SYNC_NAME"]
+    # The zone's own records, or every name's: not one server's.
+    if name == "@" or "*" in name:
+        raise ApiError(f"SYNC_NAME is {name!r}: not one server's name, nothing deleted")
+    records = records_of(key_id, secret, zone, name)
+    groups = candidates(records, name)
+    # Only where there is something to delete is the address asked for.
+    crowded = sorted({kind for (kind, _), group in groups.items() if len(group) > 1})
+    in_use = {kind: ADDRESS_NOW[kind]() for kind in crowded}
+    for kind in crowded:
+        if in_use[kind] is None:
+            say(WARNING, f"cannot tell this server's {kind} address: its other records stay")
+    doomed = sorted(stale(records, name, in_use), key=lambda record: str(record["RecordId"]))
+    for record in doomed[:MAX_DELETIONS]:
+        described = f"{record.get('Type')} {record.get('Value')}"
+        if dry_run:
+            say(NOTICE, f"would delete {described}")
+        else:
+            call(key_id, secret, "DeleteDomainRecord", RecordId=record["RecordId"])
+            say(NOTICE, f"deleted {described}")
+    if len(doomed) > MAX_DELETIONS:
+        say(NOTICE, f"{len(doomed) - MAX_DELETIONS} more at the next run")
+    return len(doomed)
+
+
+def main(arguments):
+    if arguments == ["--self-test"]:
+        self_test()
+        return 0
+    if arguments not in ([], ["--dry-run"]):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    try:
+        count = prune(os.environ, dry_run=bool(arguments))
+    except ApiError as error:
+        say(ERROR, f"error: {error}")
+        return 1
+    except Exception as error:  # Said, whatever it is: the journal keeps no traceback.
+        line = error.__traceback__.tb_next.tb_lineno if error.__traceback__.tb_next else 0
+        say(ERROR, f"error: unexpected {type(error).__name__} (line {line})")
+        return 1
+    if count == 0:
+        say(INFO, "nothing to delete")
+    return 0
+
+
+def self_test():
+    # The example of Alibaba Cloud's documentation.
+    documented = {
+        "Format": "XML",
+        "AccessKeyId": "testid",
+        "Action": "DescribeDomainRecords",
+        "SignatureMethod": "HMAC-SHA1",
+        "DomainName": "example.com",
+        "SignatureNonce": "f59ed6a9-83fc-473b-9cc6-99c95df3856e",
+        "SignatureVersion": "1.0",
+        "Version": "2015-01-09",
+        "Timestamp": "2016-03-24T16:41:54Z",
+    }
+    assert signature("testsecret", documented) == "uRpHwaSEt3J+6KQD//svCh/x+pI="
+
+    def record(record_id, kind, value, name="api", **more):
+        return {
+            "RecordId": str(record_id),
+            "RR": name,
+            "Type": kind,
+            "Value": value,
+            "Status": "ENABLE",
+            "Line": "default",
+            "Locked": False,
+            **more,
+        }
+
+    def ids(records):
+        return sorted(r["RecordId"] for r in records)
+
+    now = {"A": address_of("192.0.2.2"), "AAAA": address_of("2001:db8::2")}
+    assert now["A"] is not None and now["AAAA"] is not None
+    assert address_of("not an address") is None
+    # An address is the same however it is written.
+    assert address_of("2001:DB8:0:0:0:0:0:2") == now["AAAA"]
+
+    # Every record with another address goes, wherever the one in use
+    # stands among them.
+    zone = [
+        record(1, "A", "192.0.2.1"),
+        record(2, "A", "192.0.2.2"),
+        record(3, "A", "192.0.2.3"),
+        record(4, "AAAA", "2001:db8::1"),
+        record(5, "AAAA", "2001:DB8:0:0:0:0:0:2"),
+    ]
+    assert ids(stale(zone, "api", now)) == ["1", "3", "4"], ids(stale(zone, "api", now))
+    assert ids(stale(list(reversed(zone)), "api", now)) == ["1", "3", "4"]
+
+    # The address not known: nothing goes, of that type.
+    assert stale(zone, "api", {}) == []
+    assert stale(zone, "api", {"A": None, "AAAA": None}) == []
+    assert ids(stale(zone, "api", {"AAAA": now["AAAA"]})) == ["4"]
+    # Known, but no record has it yet (the dynamic DNS is about to publish
+    # it): nothing goes either, or the name would be left with none.
+    moved = {"A": address_of("192.0.2.99"), "AAAA": now["AAAA"]}
+    assert ids(stale(zone, "api", moved)) == ["4"]
+    assert stale([record(1, "A", "192.0.2.1")], "api", now) == []
+    assert stale([], "api", now) == []
+
+    # Other names are not ours, whatever they look like.
+    others = [
+        record(1, "A", "192.0.2.1", name="nas"),
+        record(2, "A", "192.0.2.2", name="nas"),
+        record(3, "A", "192.0.2.3", name="myapi"),
+        record(4, "A", "192.0.2.4", name="api2"),
+        record(5, "A", "192.0.2.5", name="@"),
+    ]
+    assert stale(others, "api", now) == []
+    assert ids(stale(others, "nas", now)) == ["1"]
+    # A name is a name in any case.
+    mixed_case = [record(1, "A", "192.0.2.1", name="API"), record(2, "A", "192.0.2.2")]
+    assert ids(stale(mixed_case, "api", now)) == ["1"]
+
+    # Other types stay.
+    other_types = [
+        record(1, "TXT", "192.0.2.1"),
+        record(2, "TXT", "192.0.2.2"),
+        record(3, "CAA", '0 issue "letsencrypt.org"'),
+        record(4, "CNAME", "elsewhere.example."),
+    ]
+    assert stale(other_types, "api", now) == []
+
+    # A disabled or locked record is the user's doing: not deleted, and not
+    # taken for the published address either.
+    paused = [
+        record(1, "A", "192.0.2.1"),
+        record(2, "A", "192.0.2.2"),
+        record(3, "A", "192.0.2.3", Status="DISABLE"),
+        record(4, "A", "192.0.2.4", Locked=True),
+    ]
+    assert ids(stale(paused, "api", now)) == ["1"]
+    unpublished = [
+        record(1, "A", "192.0.2.1"),
+        record(2, "A", "192.0.2.2", Status="DISABLE"),
+        record(3, "A", "192.0.2.3"),
+    ]
+    assert stale(unpublished, "api", now) == []
+
+    # Lines (answers by the asker's network) are told apart: one without
+    # the address in use keeps what it has.
+    lines = [
+        record(1, "A", "192.0.2.1"),
+        record(2, "A", "192.0.2.2"),
+        record(3, "A", "192.0.2.3", Line="telecom"),
+        record(4, "A", "192.0.2.4", Line="telecom"),
+    ]
+    assert ids(stale(lines, "api", now)) == ["1"]
+
+    # What is no address is not understood: left alone.
+    odd = [record(1, "A", "192.0.2.2"), record(2, "A", "example.com")]
+    assert stale(odd, "api", now) == []
+
+    # A page of records, and what is not one.
+    two = [record(1, "A", "192.0.2.1"), record(2, "A", "192.0.2.2")]
+    page = {"TotalCount": 2, "DomainRecords": {"Record": two}}
+    batch, total = page_of(page)
+    assert (ids(batch), total) == (["1", "2"], 2)
+    assert page_of({"TotalCount": 0, "DomainRecords": {"Record": []}}) == ([], 0)
+    not_pages = [
+        {},
+        {"TotalCount": 1},
+        {"DomainRecords": {"Record": []}},
+        {"TotalCount": "many", "DomainRecords": {"Record": []}},
+        {"TotalCount": 1, "DomainRecords": {"Record": "none"}},
+        {"TotalCount": 1, "DomainRecords": {"Record": [{"RR": "api"}]}},
+        {"TotalCount": 1, "DomainRecords": ["a list"]},
+        ["a list"],
+        None,
+    ]
+    for answer in not_pages:
+        try:
+            page_of(answer)
+        except ApiError:
+            continue
+        raise AssertionError(f"taken for a page of records: {answer!r}")
+
+    print("self-test passed")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

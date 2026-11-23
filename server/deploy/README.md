@@ -9,6 +9,7 @@
   - 在域名上提供 HTTPS，证书由 Let's Encrypt 签发，通过阿里云 DNS 验证，不需要开放 80/443；
   - 把家里的公网 IPv4 和容器自己的 IPv6 及时更新到域名的 A、AAAA 记录（DDNS）；
   - 把请求转给同步服务器。
+- 一个定时任务（`clipboardx-ddns-prune`，每 10 分钟一次）删掉域名上已经过期的地址。Caddy 的 DDNS 每换一次地址只会新增一条记录，不会删除旧的；不清理的话，客户端会连到已经不属于你的地址上。
 - 路由器把一个端口（例如 8443）的 IPv4 转发到容器，并放行到容器 IPv6 的同一端口。
 
 客户端填的地址形如 `https://sync.example.com:8443`。
@@ -21,6 +22,8 @@
   1. 在阿里云 RAM 控制台新建一个子账号，只授予 `AliyunDNSFullAccess`。
   2. 为它创建 AccessKey。
   3. 这把 AccessKey 只用来改解析、申请证书，不要用主账号的 AccessKey。
+
+  `AliyunDNSFullAccess` 能改这个阿里云账号下**所有域名的所有解析记录**，不只是同步服务器这一条；阿里云解析的授权最细也只能到整个域名。账号下还有别的重要域名或记录时，可以给同步服务器单独用一个域名（甚至单独一个账号）。
 
 ## 1. 创建 LXC 容器
 
@@ -64,6 +67,7 @@ sudo ./install.sh ./clipboardx-sync-server ./caddy
 
 - 安装同步服务器和 Caddy，各用一个专用的系统用户；
 - 安装并启动带安全加固的 systemd 服务（`clipboardx-sync`、`clipboardx-caddy`）；
+- 安装清理过期解析记录的定时任务（`clipboardx-ddns-prune.timer`，需要 `python3`，Debian 的标准模板自带）；
 - 最后打印**服务器地址**、需要做的**端口转发**，以及**管理码**。
 
 Caddy 启动后一两分钟内会更新 A 记录、拿到证书。过程可以这样查看：
@@ -103,8 +107,40 @@ journalctl -u clipboardx-sync | grep 'admin code'
 - 管理码和配对码只能换来设备令牌，并且：
   - 10 分钟内有效，只能用一次；
   - 连续输错会被暂时拒绝。
-- 同步服务器只接受本机的连接（systemd `IPAddressAllow=localhost`）。外部请求只能经过 Caddy 进来。
-- AccessKey 保存在 `/etc/clipboardx-sync/caddy.env`（0600），只能改阿里云解析。泄露时在 RAM 控制台禁用它，再换一把新的。
+- 同步服务器只监听 `127.0.0.1`，外部请求只能经过 Caddy 进来。（服务单元里的 `IPAddressAllow=localhost` 是第二道保险，但在无特权 LXC 里不生效：容器无权加载它依赖的 BPF 程序。）
+- 设备之间是平等的：任何一台已登记的设备都能生成配对码、吊销别的设备。设备丢失或令牌泄露时，吊销它之后再看一遍设备列表，把不认识的一并吊销。吊销之后，它生成而未用的配对码不再能登记设备；每台设备由谁添加记在日志里（`journalctl -u clipboardx-sync | grep registered`）。
+- AccessKey 保存在 `/etc/clipboardx-sync/caddy.env`（0600），只有解析权限（范围见上面"准备"一节）。泄露时在 RAM 控制台禁用它，再换一把新的。
+
+## 加固（建议）
+
+安装脚本不会改动容器的其他设置。下面几项建议手动做一遍：
+
+- **容器防火墙**：Caddy 是这台容器里唯一对公网的程序。压缩包里的 `nftables.conf` 限制容器能连什么、能被谁连，万一 Caddy 被攻破，入侵者不容易从这里够到家里的其他设备：
+  - 出去：只能连路由器的 DHCP，以及家庭网络**之外**的 DNS（53）和 80/443 端口，外加 ping。内网地址（私有 IPv4、IPv6 的 ULA 和链路本地地址）一律拒绝。
+  - 进来：同步端口、来自内网的 SSH、ping，以及 IPv6 运转所必需的邻居发现和路由通告。
+  - 留下的缺口：家里设备的**公网 IPv6 地址**不在"内网"范围里（前缀会变），它们的 53、80、443 端口仍然连得上。想连这个也堵住，在 PVE 里给容器单独一个网桥，在路由器上划成 DMZ 区（允许访问外网，禁止访问内网）。
+
+  规则要求容器用公共 DNS（见第 1 步）、`SYNC_PORT` 是 8443（不是的话先改文件里的端口）。先试用，两分钟后自动撤销，即使 SSH 断了也会撤销：
+
+  ```sh
+  cp nftables.conf /etc/nftables.conf
+  nft -c -f /etc/nftables.conf                                  # 只检查语法
+  systemd-run --on-active=120 --unit nft-undo nft flush ruleset   # 两分钟后撤销
+  nft -f /etc/nftables.conf
+  ```
+
+  试用期间**另开一个终端**确认：SSH 能新连上；`curl -sI https://www.aliyun.com` 能通；`curl -m 3 http://192.168.1.1`（换成你的路由器地址）被拒绝。都对了就取消撤销并让它常驻，不对就等它自己撤销：
+
+  ```sh
+  systemctl stop nft-undo.timer
+  systemctl enable nftables
+  ```
+
+  之后 SSH 要走 IPv4（或内网的 IPv6 地址）。
+- **系统更新**：`apt install unattended-upgrades`，安全更新会自动安装。Caddy 是随发布包一起编译的，Go 和 Caddy 的安全修复要靠重新安装新版本的压缩包才能进来，建议每一两个月升级一次（见下面的"升级"）。
+- **SSH**：只允许密钥登录。在 `/etc/ssh/sshd_config.d/` 下新建一个文件，写入 `PasswordAuthentication no`，然后 `systemctl restart ssh`（已有的连接不会断）。
+- **限制证书签发**：给同步服务器的域名加一条 CAA 记录，值为 `0 issue "letsencrypt.org;validationmethods=dns-01"`。这样只有能改你 DNS 的人才能为它申请到证书；临时拿到你旧 IP 地址的人不行。之后如果换用别的证书机构或验证方式，要先改这条记录，否则续期会失败。
+- **PVE 和路由器**：除了同步端口，不要把别的端口（PVE 的 8006、SSH 的 22）转发到公网。
 
 ## 维护
 
@@ -116,6 +152,13 @@ journalctl -u clipboardx-sync | grep 'admin code'
   ```
 
 - **升级**：用新版本的压缩包再次运行 `install.sh`。已有的配置、证书和数据都会保留。
+- **解析记录清理**：每 10 分钟自动运行一次，只在删了记录、出错或判断不了时才留日志（`journalctl -u clipboardx-ddns-prune`）。想看它会删什么而不真的删除：
+
+  ```sh
+  sudo sh -c 'set -a; . /etc/clipboardx-sync/caddy.env; clipboardx-ddns-prune --dry-run'
+  ```
+
+  它只动同步服务器这个名字下的 A、AAAA 记录：地址和服务器当前地址一致的那条留下，其余删除。当前地址取不到（IPv4 要问外部服务，两家说法一致才算数），或者还没有哪条记录是当前地址时，一条也不删。别的名字、别的类型、已停用或锁定的记录一概不碰。所以不要在这个名字下手动添加别的 A、AAAA 记录：它们会被当成过期地址删掉。
 - **自己构建 Caddy**（需要 Go）：
 
   ```sh

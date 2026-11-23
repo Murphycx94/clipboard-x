@@ -343,6 +343,11 @@ jobs:
           mkdir -p caddy-bin
           server/deploy/build-caddy.sh "$PWD/caddy-bin/caddy"
 
+      # The script that deletes DNS records: what it picks to delete, and
+      # how it signs its requests.
+      - name: Check the DNS cleanup
+        run: python3 -I server/deploy/clipboardx-ddns-prune --self-test
+
       - name: Package with the deploy kit
         run: |
           mkdir -p "dist/$NAME"
@@ -351,6 +356,8 @@ jobs:
           cp server/deploy/install.sh server/deploy/clipboardx-sync.service \
             server/deploy/clipboardx-sync.env.example server/deploy/Caddyfile \
             server/deploy/caddy.env.example server/deploy/clipboardx-caddy.service \
+            server/deploy/clipboardx-ddns-prune server/deploy/clipboardx-ddns-prune.service \
+            server/deploy/clipboardx-ddns-prune.timer server/deploy/nftables.conf \
             server/deploy/README.md "dist/$NAME/"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
