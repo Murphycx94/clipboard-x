@@ -70,6 +70,10 @@ impl Default for Config {
 struct Code {
     value: String,
     expires: Instant,
+    /// The device that asked for it, of a pairing code: the one it lets in
+    /// is listed as added by that device, and the code goes when that
+    /// device is revoked. None: the server's operator's.
+    issued_by: Option<String>,
 }
 
 /// One client's wrong codes.
@@ -106,6 +110,8 @@ pub struct AppState {
     store: Mutex<Store>,
     codes: Mutex<Codes>,
     events: broadcast::Sender<u64>,
+    /// The ids of devices as they are revoked: their event streams end.
+    revoked: broadcast::Sender<String>,
     config: Config,
 }
 
@@ -124,10 +130,11 @@ impl AppState {
     }
 
     /// A one-time code, accepted once before `config.code_ttl`.
-    fn new_code(&self) -> Code {
+    fn new_code(&self, issued_by: Option<String>) -> Code {
         Code {
             value: random_code(),
             expires: Instant::now() + self.config.code_ttl,
+            issued_by,
         }
     }
 
@@ -183,14 +190,16 @@ pub fn new_state(
     config: Config,
 ) -> rusqlite::Result<(Arc<AppState>, Option<String>)> {
     let (events, _) = broadcast::channel(64);
+    let (revoked, _) = broadcast::channel(16);
     let state = Arc::new(AppState {
         store: Mutex::new(store),
         codes: Mutex::new(Codes::default()),
         events,
+        revoked,
         config,
     });
     let admin = if state.store().active_devices()? == 0 {
-        let code = state.new_code();
+        let code = state.new_code(None);
         let value = code.value.clone();
         state.codes().admin = Some(code);
         Some(value)
@@ -291,22 +300,46 @@ fn now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+/// Whether `c` is kept out of a device's name: a control character or a
+/// line or paragraph separator (a line break would let a name write lines
+/// of its own in the server's log), or one that shows what follows in
+/// another order than it is written (a name tells devices apart in a list).
+fn breaks_a_name(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A device's name as it is kept: one plain line of text.
 fn device_name(name: &str) -> ApiResult<String> {
     let name = name.trim();
-    if name.is_empty() || name.chars().count() > MAX_DEVICE_NAME {
+    let plain = !name.is_empty()
+        && name.chars().count() <= MAX_DEVICE_NAME
+        && !name.chars().any(breaks_a_name);
+    if !plain {
         return Err(error(StatusCode::BAD_REQUEST, "invalid device name"));
     }
     Ok(name.to_owned())
 }
 
-/// Registers a device; its token, which only its hash outlives.
-fn register(state: &AppState, name: &str) -> ApiResult<DeviceToken> {
+/// Registers a device, added by the device `added_by` when one let it in;
+/// its token, which only its hash outlives.
+fn register(state: &AppState, name: &str, added_by: Option<&str>) -> ApiResult<DeviceToken> {
     let id = hex::encode(random_bytes::<16>());
     let token = hex::encode(random_bytes::<32>());
-    state
+    let added = state
         .store()
-        .add_device(&id, name, &hash_token(&token), now())?;
-    log::info!("device {id} ({name}) registered");
+        .add_device(&id, name, &hash_token(&token), now(), added_by)?;
+    if !added {
+        // The device whose pairing code this was has been revoked since.
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired pairing code",
+        ));
+    }
+    match added_by {
+        Some(adder) => log::info!("device {id} ({name}) registered, added by {adder}"),
+        None => log::info!("device {id} ({name}) registered"),
+    }
     Ok(DeviceToken {
         device_id: id,
         token,
@@ -415,21 +448,26 @@ async fn bootstrap(
         codes.admin = None;
         codes.guesses.remove(&client);
     }
-    Ok(Json(register(&state, &name)?))
+    Ok(Json(register(&state, &name, None)?))
 }
 
 async fn pair(State(state): State<Arc<AppState>>, authed: Authed) -> ApiResult<Json<PairingCode>> {
-    let answer = issue_pairing_code(&state);
+    let answer = pairing_code(&state, Some(authed.device_id.clone()));
     log::info!("device {} made a pairing code", authed.device_id);
     Ok(Json(answer))
 }
 
-/// A new pairing code, as a device asks for one. The server's operator can
-/// ask too (a signal to the process): with every device lost, it is how a
-/// new one joins and recovers the vault with its recovery phrase. It gives
-/// no more than the server's files do: ciphertext.
+/// A new pairing code for the server's operator (a signal to the process):
+/// with every device lost, it is how a new one joins and recovers the vault
+/// with its recovery phrase. It gives no more than the server's files do:
+/// ciphertext.
 pub fn issue_pairing_code(state: &AppState) -> PairingCode {
-    let code = state.new_code();
+    pairing_code(state, None)
+}
+
+/// A new pairing code, asked for by device `issued_by` or by the operator.
+fn pairing_code(state: &AppState, issued_by: Option<String>) -> PairingCode {
+    let code = state.new_code(issued_by);
     let answer = PairingCode {
         code: code.value.clone(),
         expires_at: now() + i64::try_from(state.config.code_ttl.as_secs()).unwrap_or(0),
@@ -449,7 +487,7 @@ async fn join(
     Json(request): Json<JoinRequest>,
 ) -> ApiResult<Json<DeviceToken>> {
     let name = device_name(&request.device_name)?;
-    {
+    let added_by = {
         let mut codes = state.codes();
         state.check_cooldown(&codes, client)?;
         let given = normalize_code(&request.code);
@@ -460,8 +498,8 @@ async fn join(
             .position(|code| code.expires > now && same(&normalize_code(&code.value), &given));
         match found {
             Some(at) => {
-                codes.pairing.remove(at);
                 codes.guesses.remove(&client);
+                codes.pairing.remove(at).issued_by
             }
             None => {
                 state.failed_code(&mut codes, client);
@@ -471,8 +509,8 @@ async fn join(
                 ));
             }
         }
-    }
-    Ok(Json(register(&state, &name)?))
+    };
+    Ok(Json(register(&state, &name, added_by.as_deref())?))
 }
 
 async fn devices(State(state): State<Arc<AppState>>, _: Authed) -> ApiResult<Json<Vec<Device>>> {
@@ -487,7 +525,22 @@ async fn revoke(
     if !state.store().revoke(&id)? {
         return Err(error(StatusCode::NOT_FOUND, "no such device"));
     }
-    log::info!("device {} revoked {id}", authed.device_id);
+    // What it could still come back with goes too: the pairing codes it
+    // asked for, and the streams it listens on.
+    let voided = {
+        let mut codes = state.codes();
+        let before = codes.pairing.len();
+        codes
+            .pairing
+            .retain(|code| code.issued_by.as_deref() != Some(id.as_str()));
+        before - codes.pairing.len()
+    };
+    // No listener is fine.
+    let _ = state.revoked.send(id.clone());
+    log::info!(
+        "device {} revoked {id} ({voided} of its pairing codes voided)",
+        authed.device_id
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -517,6 +570,7 @@ async fn put_vault(
         }
         Err(Refused::Stale) => Err(error(StatusCode::CONFLICT, "stale base version")),
         Err(Refused::NotNewer) => Err(error(StatusCode::CONFLICT, "version does not move forward")),
+        Err(Refused::TooFar) => Err(error(StatusCode::CONFLICT, "version too far ahead")),
     }
 }
 
@@ -562,16 +616,23 @@ async fn push(
 
 async fn events(
     State(state): State<Arc<AppState>>,
-    _: Authed,
+    authed: Authed,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| stream_events(state, socket))
+    upgrade.on_upgrade(move |socket| stream_events(state, socket, authed.device_id))
 }
 
-/// Sends the current sequence number, then every new one, until the client
-/// goes.
-async fn stream_events(state: Arc<AppState>, mut socket: WebSocket) {
+/// Sends device `device_id` the current sequence number, then every new
+/// one, until the client goes or the device is revoked.
+async fn stream_events(state: Arc<AppState>, mut socket: WebSocket, device_id: String) {
     let mut events = state.events.subscribe();
+    let mut revoked = state.revoked.subscribe();
+    // Unknown (the storage fails) is not active: the client asks again.
+    let active = |state: &AppState| state.store().is_active(&device_id).unwrap_or(false);
+    // Revoked since its token was checked, before this listened for it.
+    if !active(&state) {
+        return;
+    }
     let current = state.store().seq().unwrap_or(0);
     let send = |seq: u64| {
         Message::Text(
@@ -585,6 +646,20 @@ async fn stream_events(state: Arc<AppState>, mut socket: WebSocket) {
     }
     loop {
         tokio::select! {
+            // In this order: a revoked device hears nothing more.
+            biased;
+            gone = revoked.recv() => {
+                let this_device = match gone {
+                    Ok(id) => id == device_id,
+                    // Missed some: it may have been among them.
+                    Err(broadcast::error::RecvError::Lagged(_)) => !active(&state),
+                    Err(broadcast::error::RecvError::Closed) => true,
+                };
+                if this_device {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+            },
             event = events.recv() => match event {
                 Ok(seq) => {
                     if socket.send(send(seq)).await.is_err() {
@@ -705,6 +780,25 @@ mod tests {
         assert!(state.check_cooldown(&codes, numbered(crowd)).is_err());
         // Who was counted apart still is.
         assert!(state.check_cooldown(&codes, numbered(0)).is_ok());
+    }
+
+    /// A pairing code asked for as its device was being revoked: the
+    /// request had passed the token's check, and the revocation's sweep of
+    /// that device's codes came before the code was made.
+    #[test]
+    fn a_code_that_outlives_its_device_lets_nobody_in() {
+        let state = state(Config::default());
+        let Ok(device) = register(&state, "Mac", None) else {
+            panic!("the first device registers");
+        };
+        assert!(state.store().revoke(&device.device_id).unwrap());
+        let code = pairing_code(&state, Some(device.device_id.clone()));
+        assert_eq!(state.codes().pairing.len(), 1, "{code:?}");
+
+        assert!(register(&state, "Thief", Some(&device.device_id)).is_err());
+        assert_eq!(state.store().devices().unwrap(), vec![]);
+        // The operator's code names no device: it still lets one in.
+        assert!(register(&state, "Rescue", None).is_ok());
     }
 
     #[test]

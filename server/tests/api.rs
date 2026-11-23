@@ -9,7 +9,8 @@ use clipboardx_sync_proto::{
 use std::sync::Arc;
 
 use clipboardx_sync_server::{
-    AppState, Config, issue_pairing_code, new_state, serve, store::Store,
+    AppState, Config, issue_pairing_code, new_state, serve,
+    store::{MAX_VERSION_STEP, Store},
 };
 use futures_util::StreamExt;
 use reqwest::StatusCode;
@@ -116,6 +117,58 @@ impl Server {
             .await
             .unwrap()
             .status()
+    }
+
+    /// The first device, with its id.
+    async fn first(&self) -> DeviceToken {
+        let response = self.bootstrap(&self.admin).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json().await.unwrap()
+    }
+
+    /// A device joined with a pairing code `token`'s device made.
+    async fn joined_by(&self, token: &str) -> DeviceToken {
+        let response = self.join(&self.pair(token).await).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json().await.unwrap()
+    }
+
+    async fn devices(&self, token: &str) -> Vec<Device> {
+        self.http
+            .get(format!("{}/devices", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    async fn revoke(&self, token: &str, device_id: &str) -> StatusCode {
+        self.http
+            .delete(format!("{}/devices/{device_id}", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// The event stream of `token`'s device.
+    async fn events(
+        &self,
+        token: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let url = format!("{}/events", self.base.replace("http://", "ws://"));
+        let mut request =
+            tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
+                .unwrap();
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        tokio_tungstenite::connect_async(request).await.unwrap().0
     }
 }
 
@@ -500,14 +553,7 @@ async fn devices_hear_of_changes() {
             .await,
         StatusCode::NO_CONTENT
     );
-    let url = format!("{}/events", server.base.replace("http://", "ws://"));
-    let mut request =
-        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
-            .unwrap();
-    request
-        .headers_mut()
-        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
-    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let mut socket = server.events(&token).await;
     let next = |text: String| serde_json::from_str::<Event>(&text).unwrap().seq;
     let first = socket
         .next()
@@ -525,4 +571,201 @@ async fn devices_hear_of_changes() {
         .unwrap()
         .unwrap();
     assert_eq!(next(event.into_text().unwrap().to_string()), 1);
+}
+
+#[tokio::test]
+async fn a_device_is_listed_with_the_one_that_added_it() {
+    let server = start(Config::default()).await;
+    let first = server.first().await;
+    let second = server.joined_by(&first.token).await;
+    let third = server.joined_by(&second.token).await;
+    // With every device lost the operator lets one in: added by none.
+    let rescued: DeviceToken = server
+        .join(&issue_pairing_code(&server.state).code)
+        .await
+        .json()
+        .await
+        .unwrap();
+    let devices = server.devices(&first.token).await;
+    let added_by = |id: &str| {
+        let device = devices.iter().find(|d| d.id == id).unwrap();
+        device.added_by.clone()
+    };
+    assert_eq!(added_by(&first.device_id), None);
+    assert_eq!(added_by(&second.device_id), Some(first.device_id.clone()));
+    assert_eq!(added_by(&third.device_id), Some(second.device_id.clone()));
+    assert_eq!(added_by(&rescued.device_id), None);
+}
+
+#[tokio::test]
+async fn revoking_a_device_voids_the_pairing_codes_it_made() {
+    let server = start(Config::default()).await;
+    let first = server.first().await;
+    let stolen = server.joined_by(&first.token).await;
+    // What a thief keeps to come back with once the device is revoked.
+    let kept = server.pair(&stolen.token).await;
+    let own = server.pair(&first.token).await;
+    assert_eq!(
+        server.revoke(&first.token, &stolen.device_id).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(server.join(&kept).await.status(), StatusCode::UNAUTHORIZED);
+    // Another device's code is still good.
+    assert_eq!(server.join(&own).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_revoked_device_stops_hearing_of_changes() {
+    let server = start(Config::default()).await;
+    let first = server.first().await;
+    let other = server.joined_by(&first.token).await;
+    let mut staying = server.events(&first.token).await;
+    let mut revoked = server.events(&other.token).await;
+    // Each hears where the server is.
+    assert!(staying.next().await.unwrap().unwrap().is_text());
+    assert!(revoked.next().await.unwrap().unwrap().is_text());
+    assert_eq!(
+        server.revoke(&first.token, &other.device_id).await,
+        StatusCode::NO_CONTENT
+    );
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match revoked.next().await {
+                None | Some(Err(_)) => break,
+                Some(Ok(message)) if message.is_close() => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(ended.is_ok(), "the revoked device's stream stayed open");
+    // The other device's goes on.
+    let update = VaultUpdate {
+        header: Some(header(1)),
+        ..VaultUpdate::default()
+    };
+    assert_eq!(
+        server.put_vault(&first.token, &update).await,
+        StatusCode::NO_CONTENT
+    );
+    let event = tokio::time::timeout(Duration::from_secs(5), staying.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(event.is_text());
+}
+
+#[tokio::test]
+async fn device_names_are_one_plain_line() {
+    let server = start(Config::default()).await;
+    let bootstrap_as = |name: &str| {
+        server
+            .http
+            .post(format!("{}/bootstrap", server.base))
+            .json(&BootstrapRequest {
+                admin_code: server.admin.clone(),
+                device_name: name.into(),
+            })
+            .send()
+    };
+    // A line of its own in the server's log, were it let in.
+    for name in [
+        "Mac\nINFO device 0000 (Phone) registered",
+        "carriage\rreturn",
+        "tab\there",
+        "escape\u{1b}[31m",
+        "nul\u{0}",
+        // Line breaks by other names, and letters shown in another order
+        // than they are (a name tells devices apart in a list).
+        "line\u{2028}separator",
+        "paragraph\u{2029}separator",
+        "Mac \u{202e}enohP",
+        "isolate\u{2066}d",
+    ] {
+        let refused = bootstrap_as(name).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{name:?}");
+        let join = server
+            .http
+            .post(format!("{}/join", server.base))
+            .json(&JoinRequest {
+                code: "AAAA-AAAA".into(),
+                device_name: name.into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(join.status(), StatusCode::BAD_REQUEST, "{name:?}");
+    }
+    // A name is looked at before the code beside it: none of these spent
+    // the admin code. And names in any script are fine.
+    let named = bootstrap_as("我的 Mac（书房）👨‍💻").await.unwrap();
+    assert_eq!(named.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn versions_cannot_leap_out_of_reach() {
+    let server = start(Config::default()).await;
+    let token = server.first_device().await;
+    let manifest = |version| Manifest {
+        version,
+        sealed: Bytes(vec![9; 40]),
+    };
+    let put = |header: Option<VaultHeader>, base_header, m: Option<Manifest>, base_manifest| {
+        VaultUpdate {
+            header,
+            base_header,
+            manifest: m,
+            base_manifest,
+        }
+    };
+    assert_eq!(
+        server
+            .put_vault(&token, &put(Some(header(1)), 0, Some(manifest(1)), 0))
+            .await,
+        StatusCode::NO_CONTENT
+    );
+    // The largest number would leave none above it for whoever comes next.
+    let too_far = 1 + MAX_VERSION_STEP + 1;
+    for version in [u64::MAX, too_far] {
+        assert_eq!(
+            server
+                .put_vault(&token, &put(Some(header(version)), 1, None, 0))
+                .await,
+            StatusCode::CONFLICT,
+            "header {version}"
+        );
+        assert_eq!(
+            server
+                .put_vault(&token, &put(None, 0, Some(manifest(version)), 1))
+                .await,
+            StatusCode::CONFLICT,
+            "manifest {version}"
+        );
+    }
+    // Up to the limit is a device long away from the server.
+    let far = 1 + MAX_VERSION_STEP;
+    assert_eq!(
+        server
+            .put_vault(&token, &put(Some(header(far)), 1, Some(manifest(far)), 1))
+            .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let pushed: PushResponse = server
+        .push(
+            &token,
+            far,
+            vec![
+                record("near", 0, 1),
+                record("leap", 0, MAX_VERSION_STEP + 1),
+                record("most", 0, u64::MAX),
+                record("edge", 0, MAX_VERSION_STEP),
+            ],
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pushed.conflicts, vec!["leap".to_owned(), "most".to_owned()]);
 }
