@@ -12,9 +12,6 @@ use super::error::VaultError;
 const FORMAT: &str = "clipboardx-vault";
 const VERSION: u32 = 1;
 const AAD: &[u8] = b"clipboardx/vault/backup/v1";
-const MAX_KDF_MEMORY_KIB: u32 = 256 * 1024;
-const MAX_KDF_PASSES: u32 = 6;
-const MAX_KDF_LANES: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct Kdf {
@@ -110,10 +107,7 @@ pub fn decode(text: &str, password: &str) -> Result<Decoded, VaultError> {
         p: file.kdf.p,
     };
     // A hostile file could ask for gigabytes of memory or minutes of work.
-    let in_range = (8..=MAX_KDF_MEMORY_KIB).contains(&params.m)
-        && (1..=MAX_KDF_PASSES).contains(&params.t)
-        && (1..=MAX_KDF_LANES).contains(&params.p);
-    if !in_range {
+    if !params.is_affordable() {
         return Err(invalid("备份文件参数异常"));
     }
     let key = derive_key(password, &b64(&file.kdf.salt)?, params)

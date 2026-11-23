@@ -30,11 +30,8 @@ const SEALED_DIGEST_LEN: usize = NONCE_LEN + 32 + 16;
 /// Added to the title of the copy kept of a local change that lost.
 pub const CONFLICT_SUFFIX: &str = "（冲突副本）";
 
-/// Bounds of a header's key derivation and fields: a header outside them
-/// is refused before any key is derived from it.
-const MAX_KDF_MEMORY_KIB: u32 = 1024 * 1024;
-const MAX_KDF_PASSES: u32 = 10;
-const MAX_KDF_LANES: u32 = 8;
+/// Bounds of a header's fields: a header outside them is refused before
+/// any key is derived from it.
 const MIN_SALT_LEN: usize = 16;
 /// A wrapped data key: nonce, 32 bytes, tag.
 const WRAPPED_KEY_LEN: usize = NONCE_LEN + 32 + 16;
@@ -151,12 +148,17 @@ fn opens_to_digest(
 }
 
 /// Refuses a header no client of ours makes: keys from it would be costly
-/// to derive or could not work.
+/// to derive or could not work. Costly matters at every unlock: a header
+/// that waits for its password is derived from each time, and the server,
+/// or whoever holds a device's token, chooses what it asks for.
 fn check_header(header: &VaultHeader) -> Result<(), VaultError> {
+    let params = KdfParams {
+        m: header.kdf_m,
+        t: header.kdf_t,
+        p: header.kdf_p,
+    };
     let sane = header.format >= WITH_ACCOUNT_KEY
-        && (8..=MAX_KDF_MEMORY_KIB).contains(&header.kdf_m)
-        && (1..=MAX_KDF_PASSES).contains(&header.kdf_t)
-        && (1..=MAX_KDF_LANES).contains(&header.kdf_p)
+        && params.is_affordable()
         && header.salt.0.len() >= MIN_SALT_LEN
         && header.wrapped_key.0.len() == WRAPPED_KEY_LEN
         && !header.key_check.0.is_empty()
@@ -1532,6 +1534,44 @@ mod tests {
             assert_eq!(b.receive_header(&header).unwrap_err(), VaultError::Tampered);
         }
         assert!(!b.has_staged_header());
+    }
+
+    /// A header waiting for its password is derived from at every unlock:
+    /// one that asks for far more than any client makes (64 MiB, 3 passes,
+    /// 1 lane) would make each unlock take a gigabyte and many seconds.
+    #[test]
+    fn a_header_far_costlier_than_any_client_makes_is_refused() {
+        let (_, b, server, _) = pair();
+        let good = server.header.clone().unwrap();
+        let costly: Vec<VaultHeader> = vec![
+            VaultHeader {
+                kdf_m: 256 * 1024 + 1,
+                ..good.clone()
+            },
+            VaultHeader {
+                kdf_t: 7,
+                ..good.clone()
+            },
+            VaultHeader {
+                kdf_p: 5,
+                ..good.clone()
+            },
+        ];
+        for mut header in costly {
+            header.version += 5;
+            assert_eq!(b.receive_header(&header).unwrap_err(), VaultError::Tampered);
+        }
+        assert!(!b.has_staged_header());
+        // Up to there it is taken to wait for its password, as before.
+        let mut dear = VaultHeader {
+            kdf_m: 256 * 1024,
+            kdf_t: 6,
+            kdf_p: 4,
+            ..good
+        };
+        dear.version += 5;
+        assert!(b.receive_header(&dear).unwrap());
+        assert!(b.has_staged_header());
     }
 
     #[test]

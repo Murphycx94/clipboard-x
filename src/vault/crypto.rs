@@ -62,6 +62,23 @@ impl KdfParams {
     };
     /// Argon2's minimum: for tests only.
     pub const INSECURE_TEST: KdfParams = KdfParams { m: 8, t: 1, p: 1 };
+
+    /// The most that parameters from elsewhere (a backup file, a header
+    /// from the sync server) may ask for: four times the memory and twice
+    /// the passes of [`Self::DEFAULT`], which is all this app ever writes.
+    /// A hostile source would otherwise ask for gigabytes of memory or
+    /// minutes of work.
+    const MAX_MEMORY_KIB: u32 = 256 * 1024;
+    const MAX_PASSES: u32 = 6;
+    const MAX_LANES: u32 = 4;
+
+    /// Whether a key may be derived with these when they come from
+    /// elsewhere: no less than Argon2 takes, no more than the limits above.
+    pub fn is_affordable(&self) -> bool {
+        (8..=Self::MAX_MEMORY_KIB).contains(&self.m)
+            && (1..=Self::MAX_PASSES).contains(&self.t)
+            && (1..=Self::MAX_LANES).contains(&self.p)
+    }
 }
 
 /// 256 secret bits, wiped when dropped.
