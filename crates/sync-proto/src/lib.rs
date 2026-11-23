@@ -81,6 +81,11 @@ pub struct Device {
     pub created_at: i64,
     /// Unix seconds; 0 when never seen.
     pub last_seen: i64,
+    /// The device whose pairing code this one joined with. None for the
+    /// first device, for one the server's operator let in, and for those
+    /// registered before servers kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<String>,
 }
 
 /// The vault's header: what a device needs, with the master password and
@@ -210,6 +215,21 @@ mod tests {
         let back: Bytes = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Bytes(vec![1, 2, 3]));
         assert!(serde_json::from_str::<Bytes>("\"not base64!\"").is_err());
+    }
+
+    #[test]
+    fn a_device_from_an_older_server_has_no_adder() {
+        let old = r#"{"id":"d","name":"Mac","created_at":1,"last_seen":2}"#;
+        let device: Device = serde_json::from_str(old).unwrap();
+        assert_eq!(device.added_by, None);
+        // And goes out as an older client knows it.
+        assert_eq!(serde_json::to_string(&device).unwrap(), old);
+        let added = Device {
+            added_by: Some("first".into()),
+            ..device
+        };
+        let json = serde_json::to_string(&added).unwrap();
+        assert_eq!(serde_json::from_str::<Device>(&json).unwrap(), added);
     }
 
     #[test]
