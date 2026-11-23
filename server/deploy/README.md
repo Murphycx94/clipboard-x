@@ -118,7 +118,38 @@ journalctl -u clipboardx-sync | grep 'admin code'
 - **容器防火墙**：Caddy 是这台容器里唯一对公网的程序。压缩包里的 `nftables.conf` 限制容器能连什么、能被谁连，万一 Caddy 被攻破，入侵者不容易从这里够到家里的其他设备：
   - 出去：只能连路由器的 DHCP，以及家庭网络**之外**的 DNS（53）和 80/443 端口，外加 ping。内网地址（私有 IPv4、IPv6 的 ULA 和链路本地地址）一律拒绝。
   - 进来：同步端口、来自内网的 SSH、ping，以及 IPv6 运转所必需的邻居发现和路由通告。
-  - 留下的缺口：家里设备的**公网 IPv6 地址**不在"内网"范围里（前缀会变），它们的 53、80、443 端口仍然连得上。想连这个也堵住，在 PVE 里给容器单独一个网桥，在路由器上划成 DMZ 区（允许访问外网，禁止访问内网）。
+  - 家里设备的**公网 IPv6 地址**和容器在同一条链路上，前缀还会变，规则按"下一跳"来认：发往外网的包下一跳是路由器的链路本地地址，直接发往目的地址的就是家里的设备，一律拒绝。
+  - 还剩路由器自己**朝外的地址**（公网 IPv4、WAN 口的 IPv6）：它们算外网，容器的规则拦不住，而路由器把容器当内网设备，管理页对它是开着的。在路由器上加三条规则，拒绝容器访问路由器本身（不影响它经路由器上网）。OpenWrt / iStoreOS 上，把地址换成容器的 IPv4 和它 IPv6 地址的后半段：
+
+    ```sh
+    uci batch <<'RULES'
+    set firewall.sync_dhcp=rule
+    set firewall.sync_dhcp.name='sync-dhcp'
+    set firewall.sync_dhcp.src='lan'
+    set firewall.sync_dhcp.src_ip='192.168.1.50'
+    set firewall.sync_dhcp.proto='udp'
+    set firewall.sync_dhcp.dest_port='67'
+    set firewall.sync_dhcp.family='ipv4'
+    set firewall.sync_dhcp.target='ACCEPT'
+    set firewall.sync_isolate=rule
+    set firewall.sync_isolate.name='sync-isolate'
+    set firewall.sync_isolate.src='lan'
+    set firewall.sync_isolate.src_ip='192.168.1.50'
+    set firewall.sync_isolate.proto='tcp udp'
+    set firewall.sync_isolate.family='ipv4'
+    set firewall.sync_isolate.target='REJECT'
+    set firewall.sync_isolate_v6=rule
+    set firewall.sync_isolate_v6.name='sync-isolate-v6'
+    set firewall.sync_isolate_v6.src='lan'
+    set firewall.sync_isolate_v6.src_ip='::be24:11ff:fe62:3e62/-64'
+    set firewall.sync_isolate_v6.proto='tcp udp'
+    set firewall.sync_isolate_v6.family='ipv6'
+    set firewall.sync_isolate_v6.target='REJECT'
+    RULES
+    uci commit firewall && fw4 check && fw4 reload
+    ```
+
+    第一条放行 DHCP 续租，必须排在前面。
 
   规则要求容器用公共 DNS（见第 1 步）、`SYNC_PORT` 是 8443（不是的话先改文件里的端口）。先试用，两分钟后自动撤销，即使 SSH 断了也会撤销：
 
@@ -129,7 +160,7 @@ journalctl -u clipboardx-sync | grep 'admin code'
   nft -f /etc/nftables.conf
   ```
 
-  试用期间**另开一个终端**确认：SSH 能新连上；`curl -sI https://www.aliyun.com` 能通；`curl -m 3 http://192.168.1.1`（换成你的路由器地址）被拒绝。都对了就取消撤销并让它常驻，不对就等它自己撤销：
+  试用期间**另开一个终端**确认：SSH 能新连上；`curl -sI https://www.aliyun.com` 和 `curl -6 -sI https://mirrors.tuna.tsinghua.edu.cn` 能通；`curl -m 3 http://192.168.1.1`（换成你的路由器地址）被拒绝。都对了就取消撤销并让它常驻，不对就等它自己撤销：
 
   ```sh
   systemctl stop nft-undo.timer
