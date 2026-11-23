@@ -1,0 +1,39 @@
+[Unit]
+Description=Remove the DNS records ClipboardX's dynamic DNS left behind
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The domain and the DNS key, as Caddy has them.
+EnvironmentFile=/etc/clipboardx-sync/caddy.env
+ExecStart=/usr/local/bin/clipboardx-ddns-prune
+User=clipboardx-caddy
+Group=clipboardx-caddy
+# Deletions and errors only: a run that finds nothing leaves no line.
+LogLevelMax=notice
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictSUIDSGID=true
+RestrictRealtime=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+UMask=0077

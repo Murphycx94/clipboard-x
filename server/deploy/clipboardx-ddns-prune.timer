@@ -1,0 +1,12 @@
+[Unit]
+Description=Every ten minutes: remove the DNS records ClipboardX's dynamic DNS left behind
+
+[Timer]
+# Caddy looks for a new address every five minutes and publishes it at once;
+# the records of the addresses before it go at the next run here.
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
