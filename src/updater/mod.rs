@@ -156,7 +156,7 @@ pub fn check() -> Result<Option<Release>, String> {
 }
 
 fn latest_release_json() -> Result<String, String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::net::http_client()
         .timeout(TIMEOUT)
         .user_agent(concat!("ClipboardX/", env!("CARGO_PKG_VERSION")))
         .build()

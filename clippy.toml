@@ -1,0 +1,8 @@
+# An HTTP client made any other way fails on Android at its first HTTPS
+# request (src/net.rs). allow-invalid: the server's tests have reqwest
+# without its blocking half when that crate is checked by itself.
+disallowed-methods = [
+    { path = "reqwest::blocking::Client::builder", reason = "start from crate::net::http_client()", allow-invalid = true },
+    { path = "reqwest::blocking::Client::new", reason = "start from crate::net::http_client()", allow-invalid = true },
+    { path = "reqwest::blocking::ClientBuilder::new", reason = "start from crate::net::http_client()", allow-invalid = true },
+]

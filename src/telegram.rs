@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use reqwest::blocking::{Client, multipart};
+use reqwest::blocking::multipart;
 
 use crate::db::ItemContent;
 use crate::model::{ClipboardItem, minute_label};
@@ -99,7 +99,7 @@ pub fn sync_favorites(
     target: &TelegramTarget,
     favorites: &[(ClipboardItem, ItemContent)],
 ) -> Result<(), String> {
-    let client = Client::builder()
+    let client = crate::net::http_client()
         .timeout(TIMEOUT)
         .build()
         .map_err(|e| e.to_string())?;
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn network_errors_leave_the_token_out() {
         // Nothing listens on port 1: the request fails, its URL attached.
-        let error = Client::builder()
+        let error = crate::net::http_client()
             .no_proxy()
             .build()
             .unwrap()

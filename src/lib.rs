@@ -5,6 +5,7 @@
 //! - [`services`]: what the UI and the desktop host share.
 //! - [`telegram`], [`updater`], [`hotkey`], [`logger`]: the rest of the
 //!   app's services.
+//! - `net`: the TLS setup of everything that talks to a server.
 //! - `ui`: the NSH components; [`App`] is the root (`nsh.json` `"root"`).
 
 #[cfg(target_os = "android")]
@@ -16,6 +17,7 @@ pub mod db;
 pub mod hotkey;
 pub mod logger;
 pub mod model;
+mod net;
 pub mod services;
 mod system_prompt;
 pub mod telegram;

@@ -106,7 +106,7 @@ fn shared_http() -> Result<Http, VaultError> {
     if let Some(http) = HTTP.get() {
         return Ok(http.clone());
     }
-    let http = Http::builder()
+    let http = crate::net::http_client()
         .timeout(TIMEOUT)
         .pool_idle_timeout(KEPT_IDLE)
         // A redirect could carry a code or the token's request to a host
@@ -573,6 +573,8 @@ fn listen(
         request.headers_mut().insert("Authorization", value);
     }
     let stream = connect_tcp(request.uri(), quiet)?;
+    // tungstenite's TLS setup panics without one.
+    crate::net::choose_crypto_provider();
     let (mut socket, _) = tungstenite::client_tls(request, stream).map_err(|e| e.to_string())?;
     let mut asked = false;
     loop {
@@ -705,6 +707,18 @@ mod tests {
         assert!(listen(&client, &trigger, SHORT, &|| true).is_err());
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(hang_up);
+    }
+
+    #[test]
+    fn an_events_connection_over_tls_fails_at_the_handshake_not_before() {
+        // No TLS server: the handshake is as far as it can get, and it
+        // must get there (the TLS setup before it once could not).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || drop(listener.accept()));
+        let client = Client::new(&format!("https://{address}")).unwrap();
+        let (trigger, _triggered) = mpsc::channel();
+        assert!(listen(&client, &trigger, SHORT, &|| true).is_err());
     }
 
     #[test]

@@ -32,6 +32,9 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 oxipng = { version = "10.2.1", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.13.5", features = ["blocking", "json", "multipart"] }
+# The TLS under reqwest and tungstenite, named to choose its crypto provider
+# (src/net.rs): each of them brings one, and rustls will not pick.
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std"] }
 # zeroize: the cipher wipes its copy of the key when dropped, and Argon2's
 # blocks can be wiped (vault/crypto.rs does, of its working memory).
 argon2 = { version = "0.6.0", features = ["zeroize"] }
@@ -55,6 +58,8 @@ tray-icon = "0.26.1"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 libc = "0.2"
+# The certificate authorities its HTTP clients trust (src/net.rs).
+webpki-root-certs = "1.0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
@@ -104,6 +109,8 @@ nsh-engine = "0.5.0"
 nsh-testing = "0.5.0"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros"] }
+# Android's dependency, here for the test of its HTTP client (src/net.rs).
+webpki-root-certs = "1.0.11"
 
 # Without symbols: about a quarter off the binaries that ship.
 [profile.release]
