@@ -44,6 +44,8 @@ pub enum VaultError {
     BiometricKeyGone(String),
     Storage(String),
     Crypto,
+    /// The work stopped before it had an answer (it panicked).
+    Aborted,
 }
 
 impl fmt::Display for VaultError {
@@ -85,6 +87,7 @@ impl fmt::Display for VaultError {
             | VaultError::BiometricKeyGone(why) => f.write_str(why),
             VaultError::Storage(_) => f.write_str("读写密码本失败"),
             VaultError::Crypto => f.write_str("加密操作失败"),
+            VaultError::Aborted => f.write_str("操作意外中止，请重试"),
         }
     }
 }

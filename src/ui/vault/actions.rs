@@ -116,9 +116,12 @@ impl AppState {
         self.vault_busy.set(true);
         let staged = services().vault().has_staged_header();
         spawn(async move {
-            let result = blocking(work)
-                .await
-                .unwrap_or_else(|e| Err(VaultError::Storage(e.to_string())));
+            let result = blocking(work).await.unwrap_or_else(|e| {
+                // The work never answered (it panicked): whatever went
+                // wrong, it is not known to be the vault's storage.
+                log::error!("vault work stopped: {e}");
+                Err(VaultError::Aborted)
+            });
             self.vault_busy.set(false);
             if staged && !services().vault().has_staged_header() {
                 // Another device's new key was taken, wherever its password

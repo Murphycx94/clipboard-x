@@ -38,7 +38,7 @@ impl Progress {
 /// file's path.
 pub fn download(asset: &Asset, dir: &Path, progress: &Progress) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::net::http_client()
         .connect_timeout(STALL_TIMEOUT)
         // Per read: a slow download goes on, a stalled one fails.
         .timeout(STALL_TIMEOUT)
