@@ -190,7 +190,8 @@ fn clearing_the_history_deletes_all_but_the_favorites() {
 fn expired_items_leave_no_trace_to_sync() {
     let db = synced();
     let old = hash_bytes(b"old");
-    db.insert_text_at("old", &old, "2020-01-01T00:00:00").unwrap();
+    db.insert_text_at("old", &old, "2020-01-01T00:00:00")
+        .unwrap();
     let new = copy(&db, "new");
     db.cleanup_expired(30).unwrap();
     assert_eq!(local(&db, &old), None);

@@ -55,7 +55,11 @@ fn retention_cutoff(db: &Database) -> Result<Option<i64>, VaultError> {
 
 /// One round of history sync, when it is on here: the server's changes
 /// down (checked, merged, written), then this device's up.
-pub fn sync_once(vault: &VaultService, db: &Database, client: &Client) -> Result<Report, VaultError> {
+pub fn sync_once(
+    vault: &VaultService,
+    db: &Database,
+    client: &Client,
+) -> Result<Report, VaultError> {
     if !db.history_sync_enabled() {
         return Ok(Report::default());
     }

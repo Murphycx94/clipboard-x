@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 use super::item::ItemState;
 use crate::capture::hash_bytes;
 use crate::vault::VaultError;
-use crate::vault::crypto::{self, KEY_LEN, SecretKey, Sealed};
+use crate::vault::crypto::{self, KEY_LEN, Sealed, SecretKey};
 
 const SEAL_LABEL: &[u8] = b"clipboardx/history/seal/v1";
 const ID_LABEL: &[u8] = b"clipboardx/history/id/v1";
@@ -47,7 +47,9 @@ impl HistoryKeys {
 
     /// The server's name of the item whose text hashes to `hash`.
     pub fn id_of(&self, hash: &str) -> Result<String, VaultError> {
-        Ok(hex::encode(prf(self.id.as_slice(), hash.as_bytes())?.as_slice()))
+        Ok(hex::encode(
+            prf(self.id.as_slice(), hash.as_bytes())?.as_slice(),
+        ))
     }
 
     /// `item` sealed, to upload.
@@ -69,8 +71,8 @@ impl HistoryKeys {
     pub fn open(&self, record: &HistoryDown) -> Result<ItemState, VaultError> {
         let sealed = Sealed::from_parts(&record.nonce.0, &record.ciphertext.0)
             .map_err(|_| VaultError::Tampered)?;
-        let plain =
-            crypto::open(&self.seal, &sealed, &aad(&record.id)).map_err(|_| VaultError::Tampered)?;
+        let plain = crypto::open(&self.seal, &sealed, &aad(&record.id))
+            .map_err(|_| VaultError::Tampered)?;
         let item: ItemState = serde_json::from_slice(&plain).map_err(|_| VaultError::Tampered)?;
         if self.id_of(&item.hash)? != record.id {
             return Err(VaultError::Tampered);
@@ -80,7 +82,11 @@ impl HistoryKeys {
             (None, false) => true,
             _ => false,
         };
-        if whole { Ok(item) } else { Err(VaultError::Tampered) }
+        if whole {
+            Ok(item)
+        } else {
+            Err(VaultError::Tampered)
+        }
     }
 }
 
@@ -137,7 +143,10 @@ mod tests {
             deleted_at: 20,
             ..item("hello")
         };
-        assert_eq!(keys.open(&down(keys.seal(&deleted).unwrap())).unwrap(), deleted);
+        assert_eq!(
+            keys.open(&down(keys.seal(&deleted).unwrap())).unwrap(),
+            deleted
+        );
     }
 
     #[test]
@@ -179,16 +188,25 @@ mod tests {
             text: Some("goodbye".into()),
             ..hello.clone()
         };
-        assert_eq!(keys.open(&forged(&keys, &id, &swapped)), Err(VaultError::Tampered));
+        assert_eq!(
+            keys.open(&forged(&keys, &id, &swapped)),
+            Err(VaultError::Tampered)
+        );
         // Another hash than the id names.
         let renamed = item("goodbye");
-        assert_eq!(keys.open(&forged(&keys, &id, &renamed)), Err(VaultError::Tampered));
+        assert_eq!(
+            keys.open(&forged(&keys, &id, &renamed)),
+            Err(VaultError::Tampered)
+        );
         // Alive without its text, deleted with it.
         let textless = ItemState {
             text: None,
             ..hello.clone()
         };
-        assert_eq!(keys.open(&forged(&keys, &id, &textless)), Err(VaultError::Tampered));
+        assert_eq!(
+            keys.open(&forged(&keys, &id, &textless)),
+            Err(VaultError::Tampered)
+        );
         let deleted_with_text = ItemState {
             deleted_at: 20,
             meta_at: 20,

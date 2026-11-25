@@ -357,11 +357,12 @@ pub(super) fn section(title: &'static str, rows: Vec<AnyElement>) -> impl IntoEl
         )
 }
 
-/// An icon, a title over a description, and a control on the right.
+/// An icon, a title over a description (fixed, or one that follows
+/// signals), and a control on the right.
 pub(super) fn row(
     glyph: Icon,
     title: &'static str,
-    description: &'static str,
+    description: impl IntoReactive<SharedString>,
     control: impl IntoElement,
 ) -> impl IntoElement {
     view()
@@ -475,7 +476,7 @@ fn row_header(state: AppState) -> impl IntoElement {
         )
 }
 
-fn switch_control(
+pub(super) fn switch_control(
     checked: impl Fn() -> bool + Copy + 'static,
     on_change: impl Fn(bool) + 'static,
 ) -> SwitchElement {

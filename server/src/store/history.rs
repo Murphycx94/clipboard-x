@@ -121,22 +121,40 @@ mod tests {
     fn items_get_rising_numbers_and_only_the_latest_of_each_stays() {
         let mut store = Store::in_memory().unwrap();
         assert_eq!(store.history_seq().unwrap(), 0);
-        assert_eq!(store.push_history(&[item('a', b"1"), item('b', b"1")]).unwrap(), 2);
+        assert_eq!(
+            store
+                .push_history(&[item('a', b"1"), item('b', b"1")])
+                .unwrap(),
+            2
+        );
         assert_eq!(store.push_history(&[item('a', b"2")]).unwrap(), 3);
 
         let page = store.history_page(0, usize::MAX).unwrap();
         assert_eq!(ids(&page), vec![('b', 2), ('a', 3)]);
         assert_eq!(page.records[1].ciphertext, Bytes(b"2".to_vec()));
         assert_eq!((page.seq, page.more), (3, false));
-        assert_eq!(ids(&store.history_page(2, usize::MAX).unwrap()), vec![('a', 3)]);
-        assert!(store.history_page(3, usize::MAX).unwrap().records.is_empty());
+        assert_eq!(
+            ids(&store.history_page(2, usize::MAX).unwrap()),
+            vec![('a', 3)]
+        );
+        assert!(
+            store
+                .history_page(3, usize::MAX)
+                .unwrap()
+                .records
+                .is_empty()
+        );
     }
 
     #[test]
     fn pages_hold_about_the_budget_and_at_least_one_item() {
         let mut store = Store::in_memory().unwrap();
         store
-            .push_history(&[item('a', &[0; 10]), item('b', &[0; 10]), item('c', &[0; 30])])
+            .push_history(&[
+                item('a', &[0; 10]),
+                item('b', &[0; 10]),
+                item('c', &[0; 30]),
+            ])
             .unwrap();
 
         let first = store.history_page(0, 25).unwrap();
@@ -167,17 +185,26 @@ mod tests {
     #[test]
     fn a_new_header_forgets_the_items_sealed_under_the_old_one() {
         let mut store = Store::in_memory().unwrap();
-        store.update_vault(Some((&header(1), 0)), None).unwrap().unwrap();
+        store
+            .update_vault(Some((&header(1), 0)), None)
+            .unwrap()
+            .unwrap();
         store.push_history(&[item('a', b"1")]).unwrap();
         // A new manifest alone keeps them.
         let manifest = clipboardx_sync_proto::Manifest {
             version: 1,
             sealed: Bytes(vec![]),
         };
-        store.update_vault(None, Some((&manifest, 0))).unwrap().unwrap();
+        store
+            .update_vault(None, Some((&manifest, 0)))
+            .unwrap()
+            .unwrap();
         assert_eq!(store.history_page(0, usize::MAX).unwrap().records.len(), 1);
 
-        store.update_vault(Some((&header(2), 1)), None).unwrap().unwrap();
+        store
+            .update_vault(Some((&header(2), 1)), None)
+            .unwrap()
+            .unwrap();
         let page = store.history_page(0, usize::MAX).unwrap();
         assert!(page.records.is_empty());
         // Numbering goes on: a device's cursor never points past the end.
@@ -188,9 +215,17 @@ mod tests {
     #[test]
     fn a_refused_header_keeps_the_items() {
         let mut store = Store::in_memory().unwrap();
-        store.update_vault(Some((&header(1), 0)), None).unwrap().unwrap();
+        store
+            .update_vault(Some((&header(1), 0)), None)
+            .unwrap()
+            .unwrap();
         store.push_history(&[item('a', b"1")]).unwrap();
-        assert!(store.update_vault(Some((&header(2), 0)), None).unwrap().is_err());
+        assert!(
+            store
+                .update_vault(Some((&header(2), 0)), None)
+                .unwrap()
+                .is_err()
+        );
         assert_eq!(store.history_page(0, usize::MAX).unwrap().records.len(), 1);
     }
 }

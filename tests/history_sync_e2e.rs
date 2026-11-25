@@ -90,7 +90,12 @@ impl Device {
             .favorite_items()
             .unwrap()
             .into_iter()
-            .map(|i| (i.text_preview.unwrap_or_default(), i.note.unwrap_or_default()))
+            .map(|i| {
+                (
+                    i.text_preview.unwrap_or_default(),
+                    i.note.unwrap_or_default(),
+                )
+            })
             .collect()
     }
 }

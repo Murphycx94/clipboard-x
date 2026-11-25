@@ -46,17 +46,18 @@ pub fn ms_of_local(created_at: &str) -> i64 {
         .from_local_datetime(&naive)
         .earliest()
         // A time a clock change skipped: as if it were UTC, hours off at worst.
-        .map_or_else(|| naive.and_utc().timestamp_millis(), |t| t.timestamp_millis())
+        .map_or_else(
+            || naive.and_utc().timestamp_millis(),
+            |t| t.timestamp_millis(),
+        )
 }
 
 /// Unix ms as a `created_at`, in this device's time zone.
 pub fn local_of_ms(ms: i64) -> String {
-    Local
-        .timestamp_millis_opt(ms)
-        .earliest()
-        .map_or_else(|| "1970-01-01T00:00:00.000".to_owned(), |t| {
-            t.format(LOCAL_FORMAT).to_string()
-        })
+    Local.timestamp_millis_opt(ms).earliest().map_or_else(
+        || "1970-01-01T00:00:00.000".to_owned(),
+        |t| t.format(LOCAL_FORMAT).to_string(),
+    )
 }
 
 fn setting(c: &Connection, key: &str) -> Result<Option<String>> {
@@ -102,7 +103,11 @@ pub(crate) fn enable(c: &Connection) -> Result<()> {
         .collect::<Result<_>>()?;
     for (hash, created_at, favorite, note) in items {
         let copied_at = ms_of_local(&created_at);
-        let meta_at = if favorite || !note.is_empty() { copied_at } else { 0 };
+        let meta_at = if favorite || !note.is_empty() {
+            copied_at
+        } else {
+            0
+        };
         tx.execute(
             "INSERT INTO history_sync (hash, copied_at, meta_at) VALUES (?1, ?2, ?3)",
             params![hash, copied_at, meta_at],
@@ -193,7 +198,9 @@ pub(crate) fn note_deleted(c: &Connection, hash: &str, at: i64) -> Result<()> {
 /// Every item but the favorites is about to be deleted at `at`.
 pub(crate) fn note_cleared(c: &Connection, at: i64) -> Result<()> {
     let hashes: Vec<String> = c
-        .prepare("SELECT hash FROM clipboard_items WHERE is_favorite = 0 AND content_type = 'text'")?
+        .prepare(
+            "SELECT hash FROM clipboard_items WHERE is_favorite = 0 AND content_type = 'text'",
+        )?
         .query_map([], |r| r.get(0))?
         .collect::<Result<_>>()?;
     hashes.iter().try_for_each(|hash| note_deleted(c, hash, at))
@@ -269,7 +276,11 @@ fn combine(hash: &str, row: Row) -> Option<LocalItem> {
         (None, None) => None,
         (None, Some((text, favorite, note, created_at))) => {
             let copied_at = ms_of_local(&created_at);
-            let meta_at = if favorite || !note.is_empty() { copied_at } else { 0 };
+            let meta_at = if favorite || !note.is_empty() {
+                copied_at
+            } else {
+                0
+            };
             Some(LocalItem {
                 state: state(copied_at, meta_at, 0, Some((text, favorite, note))),
                 local_rev: 0,
@@ -357,7 +368,11 @@ fn save_row(c: &Connection, state: &ItemState, synced: bool) -> Result<()> {
 /// server's). Not an item this device never had that is deleted, or
 /// older than `cutoff_ms` (the retention setting) and not a favorite.
 /// Whether the history changed.
-pub(crate) fn apply_remote(c: &Connection, remote: &ItemState, cutoff_ms: Option<i64>) -> Result<bool> {
+pub(crate) fn apply_remote(
+    c: &Connection,
+    remote: &ItemState,
+    cutoff_ms: Option<i64>,
+) -> Result<bool> {
     let Some(local) = local_item(c, &remote.hash)? else {
         let expired = !remote.favorite && cutoff_ms.is_some_and(|cut| remote.copied_at < cut);
         if !remote.alive() || expired {
@@ -443,7 +458,11 @@ pub(crate) fn fetched_to(c: &Connection, seq: u64) -> Result<()> {
 
 /// Applies the server's states in one transaction; whether the history
 /// changed.
-pub(crate) fn apply_page(c: &Connection, items: &[ItemState], cutoff_ms: Option<i64>) -> Result<bool> {
+pub(crate) fn apply_page(
+    c: &Connection,
+    items: &[ItemState],
+    cutoff_ms: Option<i64>,
+) -> Result<bool> {
     let tx = c.unchecked_transaction()?;
     let mut changed = false;
     for item in items {

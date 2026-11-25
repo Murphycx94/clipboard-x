@@ -27,6 +27,7 @@ use reqwest::blocking::{Client as Http, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
 
+use crate::db::Database;
 use crate::vault::sync::Applied;
 use crate::vault::{VaultError, VaultService, VaultStatus};
 
@@ -371,6 +372,8 @@ pub struct Status {
     pub last_error: Option<String>,
     /// Conflict copies made by the last sync.
     pub conflicts: usize,
+    /// Why the clipboard history's last round failed.
+    pub history_error: Option<String>,
 }
 
 /// Syncs in the background while the vault is unlocked and sync is on.
@@ -404,11 +407,12 @@ impl Worker {
         }
     }
 
-    /// Starts the threads, once. `vault` gives the vault; `changed` runs
-    /// after a sync that changed something.
+    /// Starts the threads, once. `vault` gives the vault, `db` the history;
+    /// `changed` runs after a sync that changed something.
     pub fn start(
         &self,
         vault: impl Fn() -> &'static VaultService + Send + Sync + 'static,
+        db: impl Fn() -> &'static Database + Send + 'static,
         changed: impl Fn() + Send + 'static,
     ) {
         if self.started.swap(true, Ordering::AcqRel) {
@@ -423,7 +427,7 @@ impl Worker {
         let sync_vault = vault.clone();
         let spawned = thread::Builder::new()
             .name("vault-sync".into())
-            .spawn(move || sync_loop(&*sync_vault, &rx, &status, &changed));
+            .spawn(move || sync_loop(&*sync_vault, &db, &rx, &status, &changed));
         if let Err(e) = spawned {
             log::error!("cannot start the sync thread: {e}");
             return;
@@ -439,6 +443,7 @@ impl Worker {
 
 fn sync_loop(
     vault: &dyn Fn() -> &'static VaultService,
+    db: &dyn Fn() -> &'static Database,
     trigger: &Receiver<()>,
     status: &Mutex<Status>,
     changed: &dyn Fn(),
@@ -463,23 +468,50 @@ fn sync_loop(
             }
         };
         set_status(status, |s| s.syncing = true);
-        let result = sync_once(vault, &client);
-        set_status(status, |s| {
-            s.syncing = false;
-            match &result {
-                Ok(report) => {
-                    s.last_ok_ms = crate::vault::now_ms();
-                    s.last_error = None;
-                    s.conflicts = report.applied.conflicts;
-                }
-                Err(e) => s.last_error = Some(e.to_string()),
+        if sync_round(vault, db(), &client, status) {
+            changed();
+        }
+    }
+}
+
+/// One round of the vault, then of the history (under the header the vault
+/// settled on); whether anything here changed.
+fn sync_round(
+    vault: &VaultService,
+    db: &Database,
+    client: &Client,
+    status: &Mutex<Status>,
+) -> bool {
+    let result = sync_once(vault, client);
+    let history = match &result {
+        // The history waits for the new master password.
+        Err(VaultError::HeaderChanged) => None,
+        _ => Some(crate::history_sync::sync_once(vault, db, client)),
+    };
+    set_status(status, |s| {
+        s.syncing = false;
+        match &result {
+            Ok(report) => {
+                s.last_ok_ms = crate::vault::now_ms();
+                s.last_error = None;
+                s.conflicts = report.applied.conflicts;
             }
-        });
-        match result {
-            Ok(report) if report.applied.changed > 0 => changed(),
-            Err(VaultError::HeaderChanged) => changed(),
-            Err(e) => log::warn!("sync failed: {e}"),
-            Ok(_) => {}
+            Err(e) => s.last_error = Some(e.to_string()),
+        }
+        if let Some(history) = &history {
+            s.history_error = history.as_ref().err().map(ToString::to_string);
+        }
+    });
+    if let Some(Err(e)) = &history {
+        log::warn!("history sync failed: {e}");
+    }
+    let history_changed = matches!(history, Some(Ok(report)) if report.changed);
+    match result {
+        Ok(report) => report.applied.changed > 0 || history_changed,
+        Err(VaultError::HeaderChanged) => true,
+        Err(e) => {
+            log::warn!("sync failed: {e}");
+            history_changed
         }
     }
 }

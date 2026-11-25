@@ -348,16 +348,33 @@ impl Services {
         &self.vault
     }
 
-    /// Starts syncing the vault in the background (while it is unlocked and
-    /// sync is on); once.
+    /// Starts syncing the vault, then the history, in the background (while
+    /// the vault is unlocked and sync is on); once.
     pub fn start_sync_worker(&'static self) {
-        self.sync
-            .start(move || &self.vault, move || self.notify_changed());
+        self.sync.start(
+            move || &self.vault,
+            move || self.db(),
+            move || self.notify_changed(),
+        );
     }
 
-    /// Syncs the vault soon.
+    /// Syncs the vault (and the history) soon.
     pub fn sync_now(&self) {
         self.sync.sync_now();
+    }
+
+    /// Whether this device syncs its clipboard history.
+    pub fn history_sync_enabled(&self) -> bool {
+        self.db.history_sync_enabled()
+    }
+
+    /// Turns clipboard history sync on (syncing soon) or off.
+    pub fn set_history_sync(&self, on: bool) -> Result<(), String> {
+        self.db.set_history_sync(on).map_err(|e| e.to_string())?;
+        if on {
+            self.sync_now();
+        }
+        Ok(())
     }
 
     pub fn sync_status(&self) -> crate::cloud::Status {
