@@ -73,7 +73,10 @@ impl Server {
 
     async fn page(&self, since: u64, header: u64) -> reqwest::Response {
         self.http
-            .get(format!("{}/history?since={since}&header={header}", self.base))
+            .get(format!(
+                "{}/history?since={since}&header={header}",
+                self.base
+            ))
             .bearer_auth(&self.token)
             .send()
             .await
@@ -150,7 +153,10 @@ async fn items_go_up_and_come_down_by_number() {
 #[tokio::test]
 async fn another_header_version_is_refused_both_ways() {
     let server = start().await;
-    assert_eq!(server.push(2, vec![item('a', 32)]).await.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        server.push(2, vec![item('a', 32)]).await.status(),
+        StatusCode::CONFLICT
+    );
     assert_eq!(server.page(0, 2).await.status(), StatusCode::CONFLICT);
     assert_eq!(server.page(0, 0).await.status(), StatusCode::CONFLICT);
     assert!(server.items(0).await.records.is_empty());
@@ -177,7 +183,10 @@ async fn malformed_items_are_refused_whole() {
     // Not even the good one went in.
     assert!(server.items(0).await.records.is_empty());
     assert_eq!(
-        server.push(1, vec![item('a', MAX_CIPHERTEXT)]).await.status(),
+        server
+            .push(1, vec![item('a', MAX_CIPHERTEXT)])
+            .await
+            .status(),
         StatusCode::OK
     );
 }
@@ -203,7 +212,14 @@ async fn a_new_header_leaves_no_item_of_the_old_key() {
     assert_eq!(server.put_header(2, 1).await, StatusCode::NO_CONTENT);
     let response = server.page(0, 2).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.json::<HistoryPage>().await.unwrap().records.is_empty());
+    assert!(
+        response
+            .json::<HistoryPage>()
+            .await
+            .unwrap()
+            .records
+            .is_empty()
+    );
 }
 
 #[tokio::test]

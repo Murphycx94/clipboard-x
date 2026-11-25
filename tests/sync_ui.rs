@@ -96,4 +96,13 @@ fn sync_is_turned_on_from_the_settings() {
     // The key shown is the one the vault keeps.
     let kept = services().vault().reveal_account_key(MASTER).unwrap();
     assert_eq!(*kept, key);
+
+    // History sync: off until turned on here, off again with its switch.
+    wait(&mut app, "同步复制历史");
+    assert!(!services().history_sync_enabled());
+    app.press("label:同步复制历史").unwrap();
+    wait(&mut app, "已开启，本机的文本历史将上传");
+    assert!(services().history_sync_enabled());
+    app.press("label:同步复制历史").unwrap();
+    assert!(!services().history_sync_enabled());
 }

@@ -28,6 +28,7 @@ impl AppState {
         self.sync_server
             .set(state.map(|s| s.server_url).unwrap_or_default());
         self.sync_status.set(services().sync_status());
+        self.history_sync_on.set(services().history_sync_enabled());
     }
 
     pub fn open_sync_setup(self, mode: SyncMode) {
@@ -327,6 +328,7 @@ pub fn cloud_section(state: AppState) -> impl IntoElement {
                             state.sync_now_pressed()
                         }))
                         .into_element(),
+                    super::history::history_sync_row(state).into_element(),
                     row(
                         Icon::Key,
                         "添加设备",

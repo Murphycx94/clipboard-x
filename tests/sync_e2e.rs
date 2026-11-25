@@ -166,8 +166,10 @@ fn a_new_master_password_reaches_the_other_device() {
 fn changes_arrive_in_real_time() {
     let (a, b, _) = two_devices();
     let b: &'static VaultService = Box::leak(Box::new(b));
+    // A history without sync: the worker's history rounds do nothing.
+    let history: &'static Database = Box::leak(Box::new(Database::in_memory().unwrap()));
     let worker = Worker::default();
-    worker.start(move || b, || {});
+    worker.start(move || b, move || history, || {});
     // Let the worker connect to /events.
     std::thread::sleep(Duration::from_millis(500));
 

@@ -4,6 +4,7 @@ mod actions;
 mod cloud;
 mod dialogs;
 mod editor;
+mod history;
 mod list;
 mod lock;
 mod recovery;

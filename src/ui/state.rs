@@ -172,6 +172,8 @@ pub struct AppState {
     pub sync_on: Signal<bool>,
     pub sync_server: Signal<String>,
     pub sync_status: Signal<crate::cloud::Status>,
+    /// This device syncs its clipboard history.
+    pub history_sync_on: Signal<bool>,
     pub sync_mode: Signal<SyncMode>,
     pub sync_form: Signal<SyncForm>,
     /// The secret key shown while sync is set up or when revealed; cleared
@@ -252,6 +254,7 @@ impl AppState {
             sync_on: signal(false),
             sync_server: signal(String::new()),
             sync_status: signal(crate::cloud::Status::default()),
+            history_sync_on: signal(false),
             sync_mode: signal(SyncMode::First),
             sync_form: signal(SyncForm::default()),
             sync_secret: signal(String::new()),

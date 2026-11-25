@@ -125,11 +125,7 @@ mod tests {
             for b in &states {
                 assert_eq!(a.merge(b), b.merge(a), "commutative");
                 for c in &states {
-                    assert_eq!(
-                        a.merge(b).merge(c),
-                        a.merge(&b.merge(c)),
-                        "associative"
-                    );
+                    assert_eq!(a.merge(b).merge(c), a.merge(&b.merge(c)), "associative");
                 }
             }
         }

@@ -28,10 +28,7 @@ impl Client {
         answer(self.send(self.http.get(url))?)
     }
 
-    pub fn push_history(
-        &self,
-        request: &HistoryPush,
-    ) -> Result<Option<HistoryPushed>, VaultError> {
+    pub fn push_history(&self, request: &HistoryPush) -> Result<Option<HistoryPushed>, VaultError> {
         answer(self.send(self.http.post(self.url("history")).json(request))?)
     }
 }
@@ -51,7 +48,8 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0; 4096];
             let _ = stream.read(&mut request);
-            let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             stream.write_all(response.as_bytes()).unwrap();
         });
         Client::new(&format!("http://{address}")).unwrap()
