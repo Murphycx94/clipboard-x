@@ -2,6 +2,7 @@
 //! vault's header and its sealed manifest) and tells connected devices when
 //! something changed. It holds no key and can decrypt nothing.
 
+mod history;
 pub mod store;
 
 use std::collections::HashMap;
@@ -220,6 +221,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/devices/{id}", delete(revoke))
         .route("/v1/vault", get(get_vault).put(put_vault))
         .route("/v1/changes", get(changes).post(push))
+        .route("/v1/history", get(history::page).post(history::push))
         .route("/v1/events", get(events))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
