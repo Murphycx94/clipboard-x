@@ -708,6 +708,12 @@ impl VaultService {
         f(key.as_ref().ok_or(VaultError::Locked)?)
     }
 
+    /// The clipboard history's keys, derived from the data key: while
+    /// unlocked. Syncing is not the user's activity.
+    pub fn history_keys(&self) -> Result<crate::history_sync::seal::HistoryKeys, VaultError> {
+        self.with_key_passive(crate::history_sync::seal::HistoryKeys::derive)
+    }
+
     fn load(&self, key: &SecretKey, id: &str) -> Result<VaultEntry, VaultError> {
         let row = self
             .db

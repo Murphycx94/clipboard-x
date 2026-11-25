@@ -286,9 +286,11 @@ impl VaultService {
         Ok(self.db.with_conn(|c| store::save_sync(c, &state))?)
     }
 
-    /// Turns sync off here; the vault stays as it is.
+    /// Turns sync off here, the clipboard history's with it; the vault and
+    /// the history stay as they are.
     pub fn stop_sync(&self) -> Result<(), VaultError> {
         self.keys.delete(KeyItem::DeviceToken);
+        self.db.set_history_sync(false)?;
         Ok(self.db.with_conn(store::delete_sync)?)
     }
 
