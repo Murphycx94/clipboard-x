@@ -1,5 +1,8 @@
 //! The server's SQLite file: devices (token hashes only), the latest
-//! ciphertext of each record, the vault's header and sealed manifest.
+//! ciphertext of each record, the vault's header and sealed manifest, and
+//! the clipboard history's items ([`history`]).
+
+mod history;
 
 use std::path::Path;
 
@@ -91,6 +94,7 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Store> {
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(history::SCHEMA)?;
         // A database from before devices had adders.
         let has_adder = conn
             .prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'added_by'")?
@@ -252,6 +256,9 @@ impl Store {
                     i64_of(header.version)
                 ],
             )?;
+            // Sealed under the old header's key: the devices send theirs
+            // again under the new one.
+            history::clear(&tx)?;
         }
         if let Some((manifest, base)) = manifest {
             if base != manifest_version {
