@@ -56,6 +56,9 @@ pub struct Config {
     /// stranger's guesses must neither void the user's code nor keep the
     /// user out.
     pub cooldown: Duration,
+    /// The most ciphertext of the clipboard history kept, all devices
+    /// together.
+    pub history_bytes: u64,
 }
 
 impl Default for Config {
@@ -64,6 +67,7 @@ impl Default for Config {
             code_ttl: Duration::from_secs(600),
             max_failures: 5,
             cooldown: Duration::from_secs(60),
+            history_bytes: clipboardx_sync_proto::history::MAX_HISTORY_BYTES,
         }
     }
 }

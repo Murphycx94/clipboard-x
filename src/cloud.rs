@@ -474,8 +474,23 @@ fn sync_loop(
     }
 }
 
-/// One round of the vault, then of the history (under the header the vault
-/// settled on); whether anything here changed.
+/// What the settings page says of a history round: why it failed, or how
+/// many of the server's items it left out.
+fn history_problem(round: &Result<crate::history_sync::Report, VaultError>) -> Option<String> {
+    match round {
+        Err(e) => Some(e.to_string()),
+        Ok(report) if report.skipped > 0 => Some(format!(
+            "服务器上有 {} 条复制历史无法解开，已跳过",
+            report.skipped
+        )),
+        Ok(_) => None,
+    }
+}
+
+/// One round of the vault, then of the history; whether anything here
+/// changed. The history only after a vault round that went through: then
+/// this device's key is the one of the server's header (not one a header
+/// conflict or another device's new password left behind).
 fn sync_round(
     vault: &VaultService,
     db: &Database,
@@ -483,11 +498,9 @@ fn sync_round(
     status: &Mutex<Status>,
 ) -> bool {
     let result = sync_once(vault, client);
-    let history = match &result {
-        // The history waits for the new master password.
-        Err(VaultError::HeaderChanged) => None,
-        _ => Some(crate::history_sync::sync_once(vault, db, client)),
-    };
+    let history = result
+        .is_ok()
+        .then(|| crate::history_sync::sync_once(vault, db, client));
     set_status(status, |s| {
         s.syncing = false;
         match &result {
@@ -499,7 +512,7 @@ fn sync_round(
             Err(e) => s.last_error = Some(e.to_string()),
         }
         if let Some(history) = &history {
-            s.history_error = history.as_ref().err().map(ToString::to_string);
+            s.history_error = history_problem(history);
         }
     });
     if let Some(Err(e)) = &history {
@@ -511,7 +524,7 @@ fn sync_round(
         Err(VaultError::HeaderChanged) => true,
         Err(e) => {
             log::warn!("sync failed: {e}");
-            history_changed
+            false
         }
     }
 }

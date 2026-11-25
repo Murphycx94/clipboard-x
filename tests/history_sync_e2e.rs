@@ -1,16 +1,18 @@
 //! Two devices syncing their clipboard histories through a real sync server
 //! on a local port: copies, marks, notes, deletions, clearing, a device with
-//! it off, and a new master password.
+//! it off, a new master password, and items no device should have made.
 
 use std::sync::Arc;
 
 use clipboardx::capture::hash_bytes;
 use clipboardx::cloud::{self, Client};
 use clipboardx::db::Database;
-use clipboardx::history_sync;
+use clipboardx::history_sync::{self, item::ItemState};
 use clipboardx::vault::account_key::AccountKey;
 use clipboardx::vault::keychain::MemoryKeyStore;
 use clipboardx::vault::{KdfParams, VaultError, VaultService, now_ms};
+use clipboardx_sync_proto::Bytes;
+use clipboardx_sync_proto::history::{HistoryPush, HistoryUp};
 use clipboardx_sync_server::{Config, new_state, serve, store::Store};
 
 const PW: &str = "correct horse battery";
@@ -247,4 +249,63 @@ fn a_locked_vault_syncs_no_history() {
         history_sync::sync_once(&a.vault, &a.db, &a.client()).unwrap_err(),
         VaultError::Locked
     );
+}
+
+/// Puts `records` on the server with `device`'s token, as anyone holding
+/// it could.
+fn plant(device: &Device, records: Vec<HistoryUp>) {
+    let request = HistoryPush {
+        header_version: device.vault.header_version().unwrap(),
+        records,
+    };
+    device.client().push_history(&request).unwrap().unwrap();
+}
+
+#[test]
+fn an_unreadable_item_is_left_out_and_mended_by_a_device_that_has_it() {
+    let (a, b) = two_devices([true, true]);
+    let hash = a.copy("mended");
+    settle(&a, &b);
+    let keys = a.vault.history_keys().unwrap();
+    plant(
+        &a,
+        vec![HistoryUp {
+            id: keys.id_of(&hash).unwrap(),
+            nonce: Bytes(vec![0; 24]),
+            ciphertext: Bytes(vec![0; 64]),
+        }],
+    );
+
+    // b still syncs, the rest of the page included, and sends its own copy.
+    b.copy("still syncs");
+    let report = b.sync().unwrap();
+    assert_eq!(report.skipped, 1);
+    assert_eq!(report.pushed, 2);
+    settle(&a, &b);
+    assert_eq!(b.sync().unwrap().skipped, 0);
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    assert_eq!(sorted(a.texts()), vec!["mended", "still syncs"]);
+}
+
+#[test]
+fn an_item_from_far_in_the_future_is_left_out() {
+    let (a, b) = two_devices([true, true]);
+    let text = "from 2099";
+    let future = ItemState {
+        hash: hash_bytes(text.as_bytes()),
+        text: Some(text.into()),
+        copied_at: now_ms() as i64 + 100 * 365 * 24 * 3600 * 1000,
+        meta_at: 0,
+        favorite: false,
+        note: String::new(),
+        deleted_at: 0,
+    };
+    let keys = a.vault.history_keys().unwrap();
+    plant(&a, vec![keys.seal(&future).unwrap()]);
+    let report = b.sync().unwrap();
+    assert_eq!(report.skipped, 1);
+    assert!(b.texts().is_empty());
 }

@@ -4,7 +4,7 @@
 
 use clipboardx_sync_proto::Bytes;
 use clipboardx_sync_proto::history::{HistoryDown, HistoryPage, HistoryUp};
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 
 use super::{Store, i64_of, u64_of};
 
@@ -38,6 +38,28 @@ impl Store {
     /// The latest history sequence number.
     pub fn history_seq(&self) -> Result<u64> {
         counter(&self.conn)
+    }
+
+    /// The bytes of ciphertext the history would hold with `records` in it,
+    /// each replacing what the server has of its id.
+    pub fn history_bytes_with(&self, records: &[HistoryUp]) -> Result<u64> {
+        let held: i64 = self.conn.query_row(
+            "SELECT coalesce(sum(length(ciphertext)), 0) FROM history",
+            [],
+            |r| r.get(0),
+        )?;
+        let mut replaced: i64 = 0;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT length(ciphertext) FROM history WHERE id = ?1")?;
+        for record in records {
+            replaced += stmt
+                .query_row(params![record.id], |r| r.get::<_, i64>(0))
+                .optional()?
+                .unwrap_or(0);
+        }
+        let added: usize = records.iter().map(|r| r.ciphertext.0.len()).sum();
+        Ok(u64_of(held - replaced).saturating_add(added as u64))
     }
 
     /// Stores `records`, each replacing what the server had of its id, under
