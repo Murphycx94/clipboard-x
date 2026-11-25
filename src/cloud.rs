@@ -3,7 +3,13 @@
 //! (WebSocket) or every 30 seconds.
 //!
 //! Only ciphertext and the vault's header go over the wire; the vault
-//! ([`crate::vault`]) does the crypto and the verification.
+//! ([`crate::vault`]) does the crypto and the verification. After the
+//! vault, the worker syncs the clipboard history ([`crate::history_sync`];
+//! its endpoints are in `history`).
+
+mod history;
+
+pub use history::OLD_SERVER;
 
 use std::net::{Ipv4Addr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
