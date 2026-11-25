@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use clipboardx_sync_proto::history::{
-    HistoryPage, HistoryPush, HistoryPushed, HistoryUp, MAX_CIPHERTEXT,
+    HistoryPage, HistoryPush, HistoryPushed, HistoryUp, MAX_CIPHERTEXT, MAX_PUSH_ITEMS,
 };
 use clipboardx_sync_proto::{BootstrapRequest, Bytes, DeviceToken, VaultHeader, VaultUpdate};
 use clipboardx_sync_server::{Config, new_state, serve, store::Store};
@@ -18,7 +18,11 @@ struct Server {
 
 /// A server with one device and a vault at header version 1.
 async fn start() -> Server {
-    let (state, admin) = new_state(Store::in_memory().unwrap(), Config::default()).unwrap();
+    start_with(Config::default()).await
+}
+
+async fn start_with(config: Config) -> Server {
+    let (state, admin) = new_state(Store::in_memory().unwrap(), config).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { serve(listener, state).await.unwrap() });
@@ -175,6 +179,8 @@ async fn malformed_items_are_refused_whole() {
         short_id,
         upper_id,
         short_nonce,
+        // Shorter than the authentication tag.
+        item('a', 15),
         item('a', MAX_CIPHERTEXT + 1),
     ] {
         let response = server.push(1, vec![item('b', 32), bad]).await;
@@ -189,6 +195,34 @@ async fn malformed_items_are_refused_whole() {
             .status(),
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn an_upload_of_too_many_items_is_refused() {
+    let server = start().await;
+    let ids = (0..=MAX_PUSH_ITEMS).map(|n| HistoryUp {
+        id: format!("{n:064x}"),
+        ..item('a', 16)
+    });
+    let response = server.push(1, ids.collect()).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(server.items(0).await.records.is_empty());
+}
+
+#[tokio::test]
+async fn the_history_stops_taking_items_when_full() {
+    let server = start_with(Config {
+        history_bytes: 100,
+        ..Config::default()
+    })
+    .await;
+    let response = server.push(1, vec![item('a', 60)]).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let full = server.push(1, vec![item('b', 60)]).await;
+    assert_eq!(full.status(), StatusCode::INSUFFICIENT_STORAGE);
+    // Replacing an item with one no larger still goes in.
+    let replaced = server.push(1, vec![item('a', 60)]).await;
+    assert_eq!(replaced.status(), StatusCode::OK);
 }
 
 #[tokio::test]

@@ -398,11 +398,22 @@ pub(crate) struct Pending {
     pub rev: i64,
 }
 
-/// Items to upload, about `budget` bytes of text and notes (at least one).
+/// What an item adds to an upload besides its text and note: its id,
+/// nonce, tag and fields, in JSON and Base64 (counted generously).
+pub(crate) const RECORD_OVERHEAD: usize = 512;
+
+/// The most items one upload carries (the server takes up to
+/// `MAX_PUSH_ITEMS`).
+pub(crate) const MAX_BATCH_ITEMS: usize = 1000;
+
+/// Items to upload: about `budget` bytes (at least one item), at most
+/// [`MAX_BATCH_ITEMS`].
 pub(crate) fn pending(c: &Connection, budget: usize) -> Result<Vec<Pending>> {
     let hashes: Vec<String> = c
-        .prepare("SELECT hash FROM history_sync WHERE local_rev != pushed_rev ORDER BY rowid")?
-        .query_map([], |r| r.get(0))?
+        .prepare(
+            "SELECT hash FROM history_sync WHERE local_rev != pushed_rev ORDER BY rowid LIMIT ?1",
+        )?
+        .query_map(params![MAX_BATCH_ITEMS as i64], |r| r.get(0))?
         .collect::<Result<_>>()?;
     let mut batch = Vec::new();
     let mut bytes = 0;
@@ -410,7 +421,9 @@ pub(crate) fn pending(c: &Connection, budget: usize) -> Result<Vec<Pending>> {
         let Some(item) = local_item(c, &hash)? else {
             continue;
         };
-        let size = item.state.text.as_ref().map_or(0, String::len) + item.state.note.len();
+        let size = RECORD_OVERHEAD
+            + item.state.text.as_ref().map_or(0, String::len)
+            + item.state.note.len();
         if !batch.is_empty() && bytes + size > budget {
             break;
         }
@@ -454,6 +467,47 @@ pub(crate) fn begin_round(c: &Connection, header: u64) -> Result<u64> {
 /// The history is fetched up to `seq`.
 pub(crate) fn fetched_to(c: &Connection, seq: u64) -> Result<()> {
     set_setting(c, key::SEQ, &seq.to_string())
+}
+
+/// The server's history went back (restored from a backup): everything
+/// goes up again and comes down from the start. The sequence number to
+/// fetch after.
+pub(crate) fn restart(c: &Connection) -> Result<u64> {
+    let tx = c.unchecked_transaction()?;
+    tx.execute("UPDATE history_sync SET pushed_rev = -1", [])?;
+    set_setting(&tx, key::SEQ, "0")?;
+    tx.commit()?;
+    Ok(0)
+}
+
+/// This device's hashes in the ledger, to find the one an id names.
+pub(crate) fn hashes(c: &Connection) -> Result<Vec<String>> {
+    c.prepare("SELECT hash FROM history_sync")?
+        .query_map([], |r| r.get(0))?
+        .collect()
+}
+
+/// The server holds something unreadable for `hash`: this device's state
+/// of it goes up again, over it.
+pub(crate) fn send_again(c: &Connection, hash: &str) -> Result<()> {
+    c.execute(
+        "UPDATE history_sync SET pushed_rev = -1 WHERE hash = ?1",
+        params![hash],
+    )
+    .map(|_| ())
+}
+
+/// Forgets the deletions made before `before_ms` that the server has: the
+/// hash of a deleted text does not stay here for ever. One the server
+/// still lacks stays until it goes up.
+pub(crate) fn forget_deletions_before(c: &Connection, before_ms: i64) -> Result<()> {
+    c.execute(
+        "DELETE FROM history_sync
+         WHERE deleted_at >= max(copied_at, meta_at) AND deleted_at < ?1
+           AND local_rev = pushed_rev",
+        params![before_ms],
+    )
+    .map(|_| ())
 }
 
 /// Applies the server's states in one transaction; whether the history

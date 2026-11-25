@@ -14,6 +14,16 @@ pub const MAX_CIPHERTEXT: usize = 2 * 1024 * 1024;
 /// item), and one upload carries.
 pub const PAGE_BYTES: usize = 4 * 1024 * 1024;
 
+/// The smallest sealed item: the authentication tag alone.
+pub const MIN_CIPHERTEXT: usize = 16;
+
+/// The most items one upload may carry.
+pub const MAX_PUSH_ITEMS: usize = 2000;
+
+/// The most ciphertext the server keeps of the history, all devices
+/// together: a leaked device token cannot fill the server's disk with it.
+pub const MAX_HISTORY_BYTES: u64 = 512 * 1024 * 1024;
+
 /// The length of a nonce (XChaCha20-Poly1305).
 pub const NONCE_LEN: usize = 24;
 

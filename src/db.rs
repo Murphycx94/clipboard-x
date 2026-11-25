@@ -213,7 +213,17 @@ impl Database {
     }
 
     fn now() -> String {
-        Local::now().format("%Y-%m-%dT%H:%M:%S%.3f").to_string()
+        Self::now_timed().0
+    }
+
+    /// Now as a `created_at` and in Unix ms, read once: the text alone is
+    /// ambiguous in the hour a clock change repeats.
+    fn now_timed() -> (String, i64) {
+        let now = Local::now();
+        (
+            now.format("%Y-%m-%dT%H:%M:%S%.3f").to_string(),
+            now.timestamp_millis(),
+        )
     }
 
     fn today() -> String {
@@ -224,11 +234,23 @@ impl Database {
 
     /// Records copied text; text already there moves to now.
     pub fn insert_text(&self, content: &str, hash: &str) -> Result<()> {
-        self.insert_text_at(content, hash, &Self::now())
+        let (created_at, ms) = Self::now_timed();
+        self.insert_text_timed(content, hash, &created_at, ms)
     }
 
     /// [`insert_text`](Self::insert_text) at `created_at`.
     pub fn insert_text_at(&self, content: &str, hash: &str, created_at: &str) -> Result<()> {
+        self.insert_text_timed(content, hash, created_at, ledger::ms_of_local(created_at))
+    }
+
+    /// Records copied text at `created_at`, which is `ms` in Unix ms.
+    fn insert_text_timed(
+        &self,
+        content: &str,
+        hash: &str,
+        created_at: &str,
+        ms: i64,
+    ) -> Result<()> {
         self.change(|c, syncs| {
             c.execute(
                 "INSERT INTO clipboard_items (content_type, text_content, created_at, hash)
@@ -237,7 +259,7 @@ impl Database {
                 params![content, created_at, hash],
             )?;
             if syncs {
-                ledger::note_copied(c, hash, ledger::ms_of_local(created_at))?;
+                ledger::note_copied(c, hash, ms)?;
             }
             Ok(())
         })
@@ -268,14 +290,14 @@ impl Database {
     /// Moves the item with `hash` to now, as copying it again does; whether
     /// there is one.
     pub fn touch_item(&self, hash: &str) -> Result<bool> {
-        let now = Self::now();
+        let (now, ms) = Self::now_timed();
         self.change(|c, syncs| {
             let moved = c.execute(
                 "UPDATE clipboard_items SET created_at = ?1 WHERE hash = ?2",
                 params![now, hash],
             )? > 0;
             if moved && syncs {
-                ledger::note_copied(c, hash, ledger::ms_of_local(&now))?;
+                ledger::note_copied(c, hash, ms)?;
             }
             Ok(moved)
         })

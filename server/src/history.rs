@@ -7,8 +7,8 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use clipboardx_sync_proto::history::{
-    HistoryPage, HistoryPush, HistoryPushed, HistoryUp, MAX_CIPHERTEXT, NONCE_LEN, PAGE_BYTES,
-    valid_id,
+    HistoryPage, HistoryPush, HistoryPushed, HistoryUp, MAX_CIPHERTEXT, MAX_PUSH_ITEMS,
+    MIN_CIPHERTEXT, NONCE_LEN, PAGE_BYTES, valid_id,
 };
 use serde::Deserialize;
 
@@ -40,6 +40,9 @@ fn check(record: &HistoryUp) -> ApiResult<()> {
     if record.nonce.0.len() != NONCE_LEN {
         return bad("bad nonce");
     }
+    if record.ciphertext.0.len() < MIN_CIPHERTEXT {
+        return bad("item too short");
+    }
     if record.ciphertext.0.len() > MAX_CIPHERTEXT {
         return bad("item too large");
     }
@@ -61,10 +64,20 @@ pub(crate) async fn push(
     _: Authed,
     Json(request): Json<HistoryPush>,
 ) -> ApiResult<Json<HistoryPushed>> {
+    if request.records.len() > MAX_PUSH_ITEMS {
+        return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "too many items"));
+    }
     request.records.iter().try_for_each(check)?;
     let (seq, vault_seq) = {
         let mut store = state.store();
         same_header(&store, request.header_version)?;
+        if store.history_bytes_with(&request.records)? > state.config.history_bytes {
+            log::warn!("history storage full: an upload was refused");
+            return Err(error(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "history storage full",
+            ));
+        }
         (store.push_history(&request.records)?, store.seq()?)
     };
     // Devices sync on any event: the vault's number, unchanged, wakes them.

@@ -23,12 +23,12 @@ impl AppState {
     }
 }
 
-/// What the row says under its title: why the last round failed, if it
-/// did, else what the switch does.
+/// What the row says under its title: what went wrong in the last round,
+/// if anything did, else what the switch does.
 fn description(state: AppState) -> String {
-    let error = state.sync_status.with(|s| s.history_error.clone());
-    match error {
-        Some(error) if state.history_sync_on.get() => format!("同步失败：{error}"),
+    let problem = state.sync_status.with(|s| s.history_error.clone());
+    match problem {
+        Some(problem) if state.history_sync_on.get() => problem,
         _ => DESCRIPTION.to_owned(),
     }
 }

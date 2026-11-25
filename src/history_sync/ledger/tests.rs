@@ -316,10 +316,86 @@ fn uploads_come_in_batches_of_about_the_budget() {
     for text in ["aaaa", "bbbb", "cccc"] {
         copy(&db, text);
     }
-    let batch = db.with_conn(|c| pending(c, 9)).unwrap();
+    let two = 2 * (RECORD_OVERHEAD + 4);
+    let batch = db.with_conn(|c| pending(c, two)).unwrap();
     assert_eq!(batch.len(), 2);
     let one = db.with_conn(|c| pending(c, 1)).unwrap();
     assert_eq!(one.len(), 1);
+}
+
+#[test]
+fn deletions_count_toward_a_batch_and_batches_have_a_most() {
+    let db = synced();
+    for n in 0..MAX_BATCH_ITEMS + 10 {
+        let hash = copy(&db, &n.to_string());
+        db.delete_item(id_of(&db, &hash)).unwrap();
+    }
+    // Deletions carry no text, and still fill a request.
+    let budget = 3 * RECORD_OVERHEAD;
+    assert_eq!(db.with_conn(|c| pending(c, budget)).unwrap().len(), 3);
+    let all = db.with_conn(|c| pending(c, usize::MAX)).unwrap();
+    assert_eq!(all.len(), MAX_BATCH_ITEMS);
+}
+
+#[test]
+fn a_server_gone_back_has_everything_sent_again_from_the_start() {
+    let db = synced();
+    let hash = copy(&db, "hello");
+    assert_eq!(db.with_conn(|c| begin_round(c, 1)).unwrap(), 0);
+    push_all(&db);
+    db.with_conn(|c| fetched_to(c, 7)).unwrap();
+    assert_eq!(db.with_conn(restart).unwrap(), 0);
+    assert_eq!(db.with_conn(|c| begin_round(c, 1)).unwrap(), 0);
+    assert_eq!(pending_hashes(&db), vec![hash]);
+}
+
+#[test]
+fn an_item_the_server_holds_unreadable_is_sent_again() {
+    let db = synced();
+    let hash = copy(&db, "hello");
+    push_all(&db);
+    db.with_conn(|c| send_again(c, &hash)).unwrap();
+    assert_eq!(pending_hashes(&db), vec![hash]);
+    // One this device does not have: nothing to send.
+    db.with_conn(|c| send_again(c, "unknown")).unwrap();
+    assert_eq!(pending_hashes(&db).len(), 1);
+}
+
+#[test]
+fn old_deletions_are_forgotten_once_sent() {
+    let db = synced();
+    let old = copy(&db, "old secret");
+    let recent = copy(&db, "recent secret");
+    let unsent = copy(&db, "unsent secret");
+    let alive = copy(&db, "alive");
+    for hash in [&old, &recent, &unsent] {
+        db.delete_item(id_of(&db, hash)).unwrap();
+    }
+    push_all(&db);
+    db.with_conn(|c| {
+        // Deleted long ago, the last one not yet sent; copied long ago.
+        c.execute(
+            "UPDATE history_sync SET copied_at = 1, meta_at = 10, deleted_at = 10
+             WHERE hash IN (?1, ?2)",
+            params![old, unsent],
+        )?;
+        c.execute(
+            "UPDATE history_sync SET local_rev = local_rev + 1 WHERE hash = ?1",
+            params![unsent],
+        )?;
+        c.execute(
+            "UPDATE history_sync SET copied_at = 5 WHERE hash = ?1",
+            params![alive],
+        )
+    })
+    .unwrap();
+
+    db.with_conn(|c| forget_deletions_before(c, 100)).unwrap();
+    assert_eq!(local(&db, &old), None);
+    // Deleted just now, not yet sent, or alive: kept.
+    assert!(local(&db, &recent).is_some());
+    assert!(local(&db, &unsent).is_some());
+    assert!(local(&db, &alive).is_some());
 }
 
 #[test]
