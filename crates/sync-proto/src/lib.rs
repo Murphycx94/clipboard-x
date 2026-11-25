@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub mod history;
+
 /// The API's path prefix.
 pub const API: &str = "/v1";
 
