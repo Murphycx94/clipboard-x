@@ -819,6 +819,7 @@ dependencies = [
  "getrandom 0.4.3",
  "global-hotkey",
  "hex",
+ "hmac",
  "image",
  "jni 0.21.1",
  "libc",
