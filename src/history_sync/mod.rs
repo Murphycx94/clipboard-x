@@ -3,4 +3,5 @@
 //! the vault's data key, so only while the vault is unlocked.
 
 pub mod item;
+pub(crate) mod ledger;
 pub mod seal;

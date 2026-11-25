@@ -1,12 +1,18 @@
 //! The SQLite store of the history and the settings. The schema is the
 //! Tauri version's, so an existing `clipboardx.db` keeps working.
+//!
+//! While history sync is on, every change to an item is noted in its
+//! ledger ([`ledger`]) in the same transaction.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Local;
 use rusqlite::{Connection, OptionalExtension, Result, Row, params};
+
+use crate::history_sync::ledger;
 
 use crate::model::{
     ClipboardItem, ContentType, DEFAULT_HOTKEY, DateGroup, Settings, ThemePreference, group_by_date,
@@ -72,6 +78,23 @@ pub enum ItemContent {
 
 pub struct Database {
     conn: Mutex<Connection>,
+    /// Whether changes to items are noted for history sync.
+    syncs_history: AtomicBool,
+}
+
+/// Now, as history sync counts time.
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// The hash of item `id`; `None` when it is gone.
+fn hash_of(conn: &Connection, id: i64) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT hash FROM clipboard_items WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )
+    .optional()
 }
 
 impl Database {
@@ -93,6 +116,8 @@ impl Database {
         make_incremental(&conn);
         conn.execute_batch(crate::vault::store::SCHEMA)?;
         crate::vault::store::migrate(&conn)?;
+        conn.execute_batch(ledger::SCHEMA)?;
+        let syncs_history = ledger::is_enabled(&conn)?;
         let defaults = Settings::default();
         for (key, value) in [
             (key::HOTKEY, DEFAULT_HOTKEY.to_owned()),
@@ -122,7 +147,37 @@ impl Database {
         }
         Ok(Database {
             conn: Mutex::new(conn),
+            syncs_history: AtomicBool::new(syncs_history),
         })
+    }
+
+    /// Runs a change to items in one transaction, telling it whether
+    /// history sync notes it.
+    fn change<R>(&self, f: impl FnOnce(&Connection, bool) -> Result<R>) -> Result<R> {
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let result = f(&tx, self.syncs_history.load(Ordering::Acquire))?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Whether this device syncs its history.
+    pub fn history_sync_enabled(&self) -> bool {
+        self.syncs_history.load(Ordering::Acquire)
+    }
+
+    /// Turns history sync on (noting the history as it is, all to upload)
+    /// or off (forgetting what it noted); the history itself stays.
+    pub fn set_history_sync(&self, on: bool) -> Result<()> {
+        let conn = self.conn();
+        if on {
+            ledger::enable(&conn)?;
+        } else {
+            ledger::disable(&conn)?;
+        }
+        // Under the lock: a change after it is noted, or not, as it says.
+        self.syncs_history.store(on, Ordering::Release);
+        Ok(())
     }
 
     /// Gives the pages that deleted items left free back to the disk; how
@@ -174,13 +229,18 @@ impl Database {
 
     /// [`insert_text`](Self::insert_text) at `created_at`.
     pub fn insert_text_at(&self, content: &str, hash: &str, created_at: &str) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO clipboard_items (content_type, text_content, created_at, hash)
-             VALUES ('text', ?1, ?2, ?3)
-             ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
-            params![content, created_at, hash],
-        )?;
-        Ok(())
+        self.change(|c, syncs| {
+            c.execute(
+                "INSERT INTO clipboard_items (content_type, text_content, created_at, hash)
+                 VALUES ('text', ?1, ?2, ?3)
+                 ON CONFLICT(hash) DO UPDATE SET created_at = excluded.created_at",
+                params![content, created_at, hash],
+            )?;
+            if syncs {
+                ledger::note_copied(c, hash, ledger::ms_of_local(created_at))?;
+            }
+            Ok(())
+        })
     }
 
     /// Records a copied image (PNG) and its thumbnail (PNG).
@@ -208,11 +268,17 @@ impl Database {
     /// Moves the item with `hash` to now, as copying it again does; whether
     /// there is one.
     pub fn touch_item(&self, hash: &str) -> Result<bool> {
-        let moved = self.conn().execute(
-            "UPDATE clipboard_items SET created_at = ?1 WHERE hash = ?2",
-            params![Self::now(), hash],
-        )?;
-        Ok(moved > 0)
+        let now = Self::now();
+        self.change(|c, syncs| {
+            let moved = c.execute(
+                "UPDATE clipboard_items SET created_at = ?1 WHERE hash = ?2",
+                params![now, hash],
+            )? > 0;
+            if moved && syncs {
+                ledger::note_copied(c, hash, ledger::ms_of_local(&now))?;
+            }
+            Ok(moved)
+        })
     }
 
     /// The id and the PNG of the image item with `hash`.
@@ -295,19 +361,23 @@ impl Database {
     /// Favorites an item or takes it out of the favorites, with `note`;
     /// whether it is a favorite now.
     pub fn toggle_favorite(&self, id: i64, note: &str) -> Result<bool> {
-        let conn = self.conn();
-        conn.execute(
-            "UPDATE clipboard_items
-             SET is_favorite = CASE WHEN is_favorite = 1 THEN 0 ELSE 1 END, note = ?2
-             WHERE id = ?1",
-            params![id, note],
-        )?;
-        let favorite: i64 = conn.query_row(
-            "SELECT is_favorite FROM clipboard_items WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )?;
-        Ok(favorite != 0)
+        self.change(|c, syncs| {
+            c.execute(
+                "UPDATE clipboard_items
+                 SET is_favorite = CASE WHEN is_favorite = 1 THEN 0 ELSE 1 END, note = ?2
+                 WHERE id = ?1",
+                params![id, note],
+            )?;
+            let (favorite, hash): (i64, String) = c.query_row(
+                "SELECT is_favorite, hash FROM clipboard_items WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if syncs {
+                ledger::note_marked(c, &hash, now_ms())?;
+            }
+            Ok(favorite != 0)
+        })
     }
 
     pub fn is_favorite(&self, id: i64) -> Result<bool> {
@@ -323,17 +393,26 @@ impl Database {
     }
 
     pub fn update_note(&self, id: i64, note: &str) -> Result<()> {
-        self.conn().execute(
-            "UPDATE clipboard_items SET note = ?1 WHERE id = ?2",
-            params![note, id],
-        )?;
-        Ok(())
+        self.change(|c, syncs| {
+            c.execute(
+                "UPDATE clipboard_items SET note = ?1 WHERE id = ?2",
+                params![note, id],
+            )?;
+            if syncs && let Some(hash) = hash_of(c, id)? {
+                ledger::note_marked(c, &hash, now_ms())?;
+            }
+            Ok(())
+        })
     }
 
     pub fn delete_item(&self, id: i64) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM clipboard_items WHERE id = ?1", params![id])?;
-        Ok(())
+        self.change(|c, syncs| {
+            if syncs && let Some(hash) = hash_of(c, id)? {
+                ledger::note_deleted(c, &hash, now_ms())?;
+            }
+            c.execute("DELETE FROM clipboard_items WHERE id = ?1", params![id])?;
+            Ok(())
+        })
     }
 
     /// The full text or image of an item; `None` when it is gone.
@@ -356,13 +435,7 @@ impl Database {
 
     /// The hash of item `id`; `None` when it is gone.
     pub fn item_hash(&self, id: i64) -> Result<Option<String>> {
-        self.conn()
-            .query_row(
-                "SELECT hash FROM clipboard_items WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()
+        hash_of(&self.conn(), id)
     }
 
     /// The ids of every image item.
@@ -409,8 +482,12 @@ impl Database {
 
     /// Deletes every item that is not a favorite; how many went.
     pub fn clear_history(&self) -> Result<usize> {
-        self.conn()
-            .execute("DELETE FROM clipboard_items WHERE is_favorite = 0", [])
+        self.change(|c, syncs| {
+            if syncs {
+                ledger::note_cleared(c, now_ms())?;
+            }
+            c.execute("DELETE FROM clipboard_items WHERE is_favorite = 0", [])
+        })
     }
 
     /// Deletes non-favorites older than `retention_days` (0 keeps all).
@@ -421,10 +498,14 @@ impl Database {
         let cutoff = (Local::now() - chrono::Duration::days(retention_days))
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
-        self.conn().execute(
-            "DELETE FROM clipboard_items WHERE is_favorite = 0 AND created_at < ?1",
-            params![cutoff],
-        )
+        self.change(|c, _| {
+            // Expiry is this device's: the others keep theirs.
+            ledger::forget_expired(c, &cutoff)?;
+            c.execute(
+                "DELETE FROM clipboard_items WHERE is_favorite = 0 AND created_at < ?1",
+                params![cutoff],
+            )
+        })
     }
 
     // --- Settings ---------------------------------------------------------
@@ -630,6 +711,7 @@ mod tests {
             assert_eq!(pragma(&conn, "auto_vacuum"), 0);
             let db = Database {
                 conn: Mutex::new(conn),
+                syncs_history: AtomicBool::new(false),
             };
             insert_big_image(&db, 1);
             insert_big_image(&db, 2);
