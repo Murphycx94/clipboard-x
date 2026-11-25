@@ -3,6 +3,7 @@
 //! - [`model`], [`db`]: the history and the settings, in SQLite.
 //! - [`capture`]: watching the system clipboard, copying items back.
 //! - [`services`]: what the UI and the desktop host share.
+//! - [`cloud`], [`history_sync`]: syncing the vault and the history.
 //! - [`telegram`], [`updater`], [`hotkey`], [`logger`]: the rest of the
 //!   app's services.
 //! - `net`: the TLS setup of everything that talks to a server.
@@ -13,6 +14,7 @@ mod android;
 pub mod capture;
 pub mod cloud;
 pub mod db;
+pub mod history_sync;
 #[cfg(not(target_os = "android"))]
 pub mod hotkey;
 pub mod logger;
